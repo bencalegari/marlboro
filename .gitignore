@@ -1,0 +1,31 @@
+# Secrets (if ever generated locally)
+.env
+.env.local
+
+# TLS/certificates
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# All service runtime data (add new services under services/ and this covers them)
+services/
+
+# Media & downloads
+media/
+downloads/
+photos/
+roms/
+
+# Logs
+*.log
+logs/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~

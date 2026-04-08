@@ -1,0 +1,410 @@
+services:
+
+  # ─── Media Server ─────────────────────────────────────────────────────────
+
+  jellyfin:
+    container_name: jellyfin
+    image: jellyfin/jellyfin
+    restart: unless-stopped
+    network_mode: host  # required for DLNA auto-discovery
+    environment:
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./services/jellyfin/config:/config
+      - /mnt/tank/media:/media
+    devices:
+      - /dev/dri:/dev/dri  # Intel UHD 630 QuickSync hardware transcode
+
+  # ─── DNS / Ad Blocking ────────────────────────────────────────────────────
+
+  adguard:
+    container_name: adguard
+    image: adguard/adguardhome
+    restart: unless-stopped
+    networks:
+      - homelab
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "3000:3000"   # initial setup wizard
+      - "3001:3001"   # web UI after setup
+    volumes:
+      - ./services/adguard/work:/opt/adguardhome/work
+      - ./services/adguard/conf:/opt/adguardhome/conf
+
+  # ─── Cloudflare Bypass Proxy ──────────────────────────────────────────────
+
+  flaresolverr:
+    container_name: flaresolverr
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - TZ=America/Los_Angeles
+      - LOG_LEVEL=info
+    ports:
+      - "8191:8191"
+
+  # ─── Indexer Manager ──────────────────────────────────────────────────────
+
+  prowlarr:
+    container_name: prowlarr
+    image: lscr.io/linuxserver/prowlarr
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./services/prowlarr/config:/config
+    ports:
+      - "9696:9696"
+
+  # ─── Movie Manager ────────────────────────────────────────────────────────
+
+  radarr:
+    container_name: radarr
+    image: lscr.io/linuxserver/radarr
+    restart: unless-stopped
+    networks:
+      - homelab
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./services/radarr/config:/config
+      - /mnt/tank/media/movies:/movies
+      - /mnt/tank/downloads:/downloads
+    ports:
+      - "7878:7878"
+
+  # ─── TV Manager ───────────────────────────────────────────────────────────
+
+  sonarr:
+    container_name: sonarr
+    image: lscr.io/linuxserver/sonarr
+    restart: unless-stopped
+    networks:
+      - homelab
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./services/sonarr/config:/config
+      - /mnt/tank/media/tv:/tv
+      - /mnt/tank/downloads:/downloads
+    ports:
+      - "8989:8989"
+
+  # ─── Subtitle Downloader ──────────────────────────────────────────────────
+
+  bazarr:
+    container_name: bazarr
+    image: lscr.io/linuxserver/bazarr
+    restart: unless-stopped
+    networks:
+      - homelab
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./services/bazarr/config:/config
+      - /mnt/tank/media/movies:/movies
+      - /mnt/tank/media/tv:/tv
+    ports:
+      - "6767:6767"
+
+  # ─── Quality Profile Sync ─────────────────────────────────────────────────
+
+  profilarr:
+    container_name: profilarr
+    image: santiagosayshey/profilarr:latest
+    restart: unless-stopped
+    networks:
+      - homelab
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./services/profilarr/config:/config
+    ports:
+      - "6868:6868"
+
+  # ─── Media Request Management ─────────────────────────────────────────────
+
+  seerr:
+    container_name: seerr
+    image: ghcr.io/seerr-team/seerr:latest
+    init: true
+    restart: unless-stopped
+    networks:
+      - homelab
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    environment:
+      - TZ=America/Los_Angeles
+      - LOG_LEVEL=info
+    volumes:
+      - ./services/jellyseerr/config:/app/config
+    ports:
+      - "5055:5055"
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/status || exit 1
+      start_period: 20s
+      timeout: 3s
+      interval: 15s
+      retries: 3
+
+  # ─── Torrent Client ───────────────────────────────────────────────────────
+
+  qbittorrent:
+    container_name: qbittorrent
+    image: lscr.io/linuxserver/qbittorrent
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los_Angeles
+      - WEBUI_PORT=8080
+    volumes:
+      - ./services/qbittorrent/config:/config
+      - /mnt/tank/downloads:/downloads
+    ports:
+      - "6881:6881"
+      - "6881:6881/udp"
+      - "8181:8080"
+
+  # ─── Photo Management ─────────────────────────────────────────────────────
+
+  immich-server:
+    container_name: immich-server
+    image: ghcr.io/immich-app/immich-server:release
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - TZ=America/Los_Angeles
+      - DB_HOSTNAME=immich-postgres
+      - DB_USERNAME=immich
+      - DB_PASSWORD=${IMMICH_DB_PASSWORD}
+      - DB_DATABASE_NAME=immich
+      - REDIS_HOSTNAME=immich-redis
+    volumes:
+      - /mnt/tank/photos:/usr/src/app/upload
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "2283:2283"
+    depends_on:
+      - immich-redis
+      - immich-postgres
+    devices:
+      - /dev/dri:/dev/dri
+
+  immich-machine-learning:
+    container_name: immich-machine-learning
+    image: ghcr.io/immich-app/immich-machine-learning:release
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./services/immich/model-cache:/cache
+
+  immich-redis:
+    container_name: immich-redis
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    networks:
+      - homelab
+
+  immich-postgres:
+    container_name: immich-postgres
+    image: tensorchord/pgvecto-rs:pg14-v0.2.0
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - POSTGRES_USER=immich
+      - POSTGRES_PASSWORD=${IMMICH_DB_PASSWORD}
+      - POSTGRES_DB=immich
+    volumes:
+      - ./services/immich/postgres:/var/lib/postgresql/data
+
+  # ─── ROM Manager ──────────────────────────────────────────────────────────
+
+  romm-db:
+    container_name: romm-db
+    image: mariadb:latest
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - MARIADB_ROOT_PASSWORD=${ROMM_ROOT_PASSWORD}
+      - MARIADB_DATABASE=romm
+      - MARIADB_USER=romm-user
+      - MARIADB_PASSWORD=${ROMM_DB_PASSWORD}
+    volumes:
+      - ./services/romm/db:/var/lib/mysql
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  romm:
+    container_name: romm
+    image: rommapp/romm:latest
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - TZ=America/Los_Angeles
+      - DB_HOST=romm-db
+      - DB_NAME=romm
+      - DB_USER=romm-user
+      - DB_PASSWD=${ROMM_DB_PASSWORD}
+      - ROMM_AUTH_SECRET_KEY=${ROMM_SECRET_KEY}
+      - IGDB_CLIENT_ID=                             # optional
+      - IGDB_CLIENT_SECRET=                         # optional
+      - SCREENSCRAPER_USER=                         # optional
+      - SCREENSCRAPER_PASSWORD=                     # optional
+    volumes:
+      - /mnt/tank/media/roms:/romm/library
+      - ./services/romm/resources:/romm/resources
+      - ./services/romm/assets:/romm/assets
+      - ./services/romm/config:/romm/config
+    ports:
+      - "7070:8080"
+    depends_on:
+      romm-db:
+        condition: service_healthy
+
+  # ─── Docker Management ────────────────────────────────────────────────────
+
+  portainer:
+    container_name: portainer
+    image: portainer/portainer-ce
+    restart: unless-stopped
+    networks:
+      - homelab
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./services/portainer/config:/data
+    ports:
+      - "9000:9000"
+
+  # ─── Reverse Proxy ────────────────────────────────────────────────────────
+
+  nginx-proxy-manager:
+    container_name: nginx-proxy-manager
+    image: jc21/nginx-proxy-manager
+    restart: unless-stopped
+    networks:
+      - homelab
+    volumes:
+      - ./services/nginx-proxy-manager/config:/data
+      - ./services/nginx-proxy-manager/letsencrypt:/etc/letsencrypt
+    ports:
+      - "80:80"
+      - "443:443"
+      - "81:81"
+
+  # ─── Drive Health Monitoring ──────────────────────────────────────────────
+
+  scrutiny:
+    container_name: scrutiny
+    image: ghcr.io/analogj/scrutiny:master-omnibus
+    restart: unless-stopped
+    networks:
+      - homelab
+    cap_add:
+      - SYS_RAWIO
+    volumes:
+      - /run/udev:/run/udev:ro
+      - ./services/scrutiny/config:/opt/scrutiny/config
+      - ./services/scrutiny/influxdb:/opt/scrutiny/influxdb
+    # devices:                  # uncomment when drives arrive
+    #   - /dev/sda:/dev/sda
+    #   - /dev/sdb:/dev/sdb
+    #   - /dev/sdc:/dev/sdc
+    #   - /dev/sdd:/dev/sdd
+    ports:
+      - "8085:8080"
+
+  # ─── Auto Updater ─────────────────────────────────────────────────────────
+
+  watchtower:
+    container_name: watchtower
+    image: containrrr/watchtower:latest
+    restart: unless-stopped
+    networks:
+      - homelab
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_SCHEDULE=0 0 4 * * *
+      - TZ=America/Los_Angeles
+      - DOCKER_API_VERSION=1.54           # required for Ubuntu 25.10
+
+  # ─── Uptime Monitoring ────────────────────────────────────────────────────
+
+  uptime-kuma:
+    container_name: uptime-kuma
+    image: louislam/uptime-kuma:latest
+    restart: unless-stopped
+    networks:
+      - homelab
+    volumes:
+      - ./services/uptime-kuma:/app/data
+    ports:
+      - "3002:3001"
+
+  # ─── Dashboard ────────────────────────────────────────────────────────────
+
+  glance:
+    container_name: glance
+    image: glanceapp/glance
+    restart: unless-stopped
+    networks:
+      - homelab
+    volumes:
+      - ./services/glance/config:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/proc:ro
+      - /sys:/sys:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - jellyfin
+      - adguard
+      - prowlarr
+      - radarr
+      - sonarr
+      - qbittorrent
+      - immich-server
+      - seerr
+
+networks:
+  homelab:
+    driver: bridge
