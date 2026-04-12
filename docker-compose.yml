@@ -284,10 +284,10 @@ services:
       - DB_USER=romm-user
       - DB_PASSWD=${ROMM_DB_PASSWORD}
       - ROMM_AUTH_SECRET_KEY=${ROMM_SECRET_KEY}
-      - IGDB_CLIENT_ID=                             # optional
-      - IGDB_CLIENT_SECRET=                         # optional
-      - SCREENSCRAPER_USER=                         # optional
-      - SCREENSCRAPER_PASSWORD=                     # optional
+      - IGDB_CLIENT_ID=${IGDB_CLIENT_ID}
+      - IGDB_CLIENT_SECRET=${IGDB_CLIENT_SECRET}
+      - SCREENSCRAPER_USER=${SCREENSCRAPER_USER}
+      - SCREENSCRAPER_PASSWORD=${SCREENSCRAPER_PASSWORD}
     volumes:
       - /mnt/tank/media/roms:/romm/library
       - ./services/romm/resources:/romm/resources
@@ -343,11 +343,11 @@ services:
       - /run/udev:/run/udev:ro
       - ./services/scrutiny/config:/opt/scrutiny/config
       - ./services/scrutiny/influxdb:/opt/scrutiny/influxdb
-    # devices:                  # uncomment when drives arrive
-    #   - /dev/sda:/dev/sda
-    #   - /dev/sdb:/dev/sdb
-    #   - /dev/sdc:/dev/sdc
-    #   - /dev/sdd:/dev/sdd
+    devices:
+      - /dev/sda:/dev/sda
+      - /dev/sdb:/dev/sdb
+      - /dev/sdc:/dev/sdc
+      - /dev/sdd:/dev/sdd
     ports:
       - "8085:8080"
 
@@ -404,6 +404,19 @@ services:
       - qbittorrent
       - immich-server
       - seerr
+
+  # ─── Dynamic DNS ──────────────────────────────────────────────────────────
+
+  duckdns:
+    container_name: duckdns
+    image: lscr.io/linuxserver/duckdns
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - TZ=America/Los_Angeles
+      - SUBDOMAINS=marlboro-bc
+      - TOKEN=${DUCKDNS_TOKEN}
 
 networks:
   homelab:

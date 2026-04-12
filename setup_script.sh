@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# setup.sh — Homelab credential generation and 1Password storage
-# Run ONCE before `op run --env-file=.op.env -- docker compose up -d`
-# Requires: 1Password CLI (op), jq, tailscale installed and authenticated
+# setup.sh - Homelab credential generation, 1Password storage, and .env sync
+# Idempotent: safe to re-run. Creates missing 1Password items, then pulls all
+# values and writes .env. Requires: 1Password CLI (op), jq
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
 TAG="marlboro-nas"
 VAULT="Private"         # run `op vault list` to confirm your vault name
 
@@ -13,132 +15,134 @@ VAULT="Private"         # run `op vault list` to confirm your vault name
 log() { echo -e "\033[1;32m==>\033[0m $1" >&2; }
 err() { echo -e "\033[1;31mERROR:\033[0m $1" >&2; exit 1; }
 
-store_password() {
+# Create a Login item with a generated password if it doesn't exist
+ensure_password() {
   local title="$1"
   local username="$2"
-  local password
 
   if op item get "$title" --vault "$VAULT" &>/dev/null; then
-    log "Item '$title' already exists in 1Password, skipping"
-    password=$(op item get "$title" --vault "$VAULT" --fields password --reveal)
+    log "Item '$title' already exists, skipping"
   else
     log "Creating '$title' in 1Password..."
-    password=$(op item create \
+    op item create \
       --category Login \
       --title "$title" \
       --vault "$VAULT" \
       --tags "$TAG" \
       --generate-password="letters,digits,32" \
-      username="$username" \
-      --format json | jq -r '.fields[] | select(.id=="password") | .value')
+      username="$username" > /dev/null
   fi
-
-  echo "$password"
 }
 
-store_credential() {
+# Create a Login item with a specific secret (e.g. hex key) if it doesn't exist
+ensure_secret() {
   local title="$1"
   local username="$2"
-  local password="$3"
-  local url="${4:-}"
+  local secret="$3"
 
   if op item get "$title" --vault "$VAULT" &>/dev/null; then
-    log "Item '$title' already exists in 1Password, skipping"
-    return
+    log "Item '$title' already exists, skipping"
+  else
+    log "Creating '$title' in 1Password..."
+    op item create \
+      --category Login \
+      --title "$title" \
+      --vault "$VAULT" \
+      --tags "$TAG" \
+      username="$username" \
+      password="$secret" > /dev/null
   fi
+}
 
-  log "Storing '$title' in 1Password..."
-  op item create \
-    --category Login \
-    --title "$title" \
-    --vault "$VAULT" \
-    --tags "$TAG" \
-    ${url:+--url "$url"} \
-    username="$username" \
-    password="$password" \
-    > /dev/null
+# Pull a field from 1Password; returns empty string if item/field missing
+pull_field() {
+  local title="$1"
+  local field="$2"
+  op item get "$title" --vault "$VAULT" --fields "$field" --reveal 2>/dev/null || true
 }
 
 # ─── Preflight ────────────────────────────────────────────────────────────────
 
-command -v op &>/dev/null || err "1Password CLI (op) not found. Run Part 3 of the guide first."
+command -v op &>/dev/null || err "1Password CLI (op) not found."
 command -v jq &>/dev/null || err "jq not found. Run: sudo apt install jq"
-command -v tailscale &>/dev/null || err "tailscale not found. Run Part 15 of the guide first."
-op whoami &>/dev/null || err "Not signed in to 1Password. Run: op signin"
+op whoami &>/dev/null || err "Not signed in to 1Password. Run: eval \$(op signin)"
 
 log "Signed in as: $(op whoami --format=json | jq -r '.email')"
-log "Generating credentials and storing in 1Password (vault: $VAULT, tag: $TAG)..."
+log "Ensuring credentials exist in 1Password (vault: $VAULT, tag: $TAG)..."
 
-# ─── Generate Credentials ─────────────────────────────────────────────────────
+# ─── Create Missing Items ─────────────────────────────────────────────────────
 
-IMMICH_DB_PASSWORD=$(store_password "Marlboro NAS — Immich DB" "immich")
-QBIT_PASSWORD=$(store_password "Marlboro NAS — qBittorrent" "admin")
-NPM_PASSWORD=$(store_password "Marlboro NAS — Nginx Proxy Manager" "admin@example.com")
-PORTAINER_PASSWORD=$(store_password "Marlboro NAS — Portainer" "admin")
-ROMM_DB_PASSWORD=$(store_password "Marlboro NAS — RomM DB" "romm-user")
-ROMM_ROOT_PASSWORD=$(store_password "Marlboro NAS — RomM DB Root" "root")
+ensure_password "Marlboro NAS - Immich DB"            "immich"
+ensure_password "Marlboro NAS - qBittorrent"          "admin"
+ensure_password "Marlboro NAS - Nginx Proxy Manager"  "admin@example.com"
+ensure_password "Marlboro NAS - Portainer"            "admin"
+ensure_password "Marlboro NAS - RomM DB"              "romm-user"
+ensure_password "Marlboro NAS - RomM DB Root"         "root"
+ensure_secret   "Marlboro NAS - RomM Auth Secret"     "romm" "$(openssl rand -hex 32)"
 
-if ! op item get "Marlboro NAS — RomM Auth Secret" --vault "$VAULT" &>/dev/null; then
-  log "Creating 'Marlboro NAS — RomM Auth Secret' in 1Password..."
-  _secret=$(openssl rand -hex 32)
-  op item create \
-    --category Login \
-    --title "Marlboro NAS — RomM Auth Secret" \
-    --vault "$VAULT" \
-    --tags "$TAG" \
-    username="romm" \
-    password="$_secret" > /dev/null
-else
-  log "Item 'Marlboro NAS — RomM Auth Secret' already exists in 1Password, skipping"
+# DuckDNS token must be created manually — just warn if missing
+if ! op item get "Marlboro NAS - DuckDNS" --vault "$VAULT" &>/dev/null; then
+  log "WARNING: 'Marlboro NAS - DuckDNS' not found in 1Password — DUCKDNS_TOKEN will be blank"
 fi
+
+# IGDB credentials must be created manually — just warn if missing
+if ! op item get "Marlboro NAS - IGDB" --vault "$VAULT" &>/dev/null; then
+  log "WARNING: 'Marlboro NAS - IGDB' not found in 1Password — IGDB vars will be blank"
+fi
+
+# ScreenScraper credentials must be created manually — just warn if missing
+if ! op item get "Marlboro NAS - Screenscraper" --vault "$VAULT" &>/dev/null; then
+  log "WARNING: 'Marlboro NAS - Screenscraper' not found in 1Password — SCREENSCRAPER vars will be blank"
+fi
+
+# ─── Pull Credentials & Write .env ────────────────────────────────────────────
+
+log "Pulling credentials from 1Password and writing $ENV_FILE..."
+
+cat > "$ENV_FILE" <<EOF
+# Generated by setup_script.sh — do not commit this file to git
+# Credentials are stored in 1Password under tag: $TAG
+
+IMMICH_DB_PASSWORD=$(pull_field "Marlboro NAS - Immich DB" password)
+QBIT_PASSWORD=$(pull_field "Marlboro NAS - qBittorrent" password)
+ROMM_ROOT_PASSWORD=$(pull_field "Marlboro NAS - RomM DB Root" password)
+ROMM_DB_PASSWORD=$(pull_field "Marlboro NAS - RomM DB" password)
+ROMM_SECRET_KEY=$(pull_field "Marlboro NAS - RomM Auth Secret" password)
+DUCKDNS_TOKEN=$(pull_field "Marlboro NAS - DuckDNS" token)
+IGDB_CLIENT_ID=$(pull_field "Marlboro NAS - IGDB" client_id)
+IGDB_CLIENT_SECRET=$(pull_field "Marlboro NAS - IGDB" secret)
+SCREENSCRAPER_USER=$(pull_field "Marlboro NAS - Screenscraper" username)
+SCREENSCRAPER_PASSWORD=$(pull_field "Marlboro NAS - Screenscraper" password)
+EOF
+
+chmod 600 "$ENV_FILE"
+
+log ".env written with $(grep -c '=' "$ENV_FILE") variables"
 
 # ─── Store Network Details ─────────────────────────────────────────────────────
 
-if ! op item get "Marlboro NAS — Network" --vault "$VAULT" &>/dev/null; then
-  log "Storing network details in 1Password..."
-  op item create \
-    --category "Secure Note" \
-    --title "Marlboro NAS — Network" \
-    --vault "$VAULT" \
-    --tags "$TAG" \
-    "static-ip[text]=$(ip -4 addr show enp4s0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)" \
-    "tailscale-hostname[text]=$(tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")')" \
-    "tailscale-ip[text]=$(tailscale ip -4)" > /dev/null
-else
-  log "Item 'Marlboro NAS — Network' already exists in 1Password, skipping"
+if command -v tailscale &>/dev/null; then
+  if ! op item get "Marlboro NAS - Network" --vault "$VAULT" &>/dev/null; then
+    log "Storing network details in 1Password..."
+    op item create \
+      --category "Secure Note" \
+      --title "Marlboro NAS - Network" \
+      --vault "$VAULT" \
+      --tags "$TAG" \
+      "static-ip[text]=$(ip -4 addr show enp4s0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)" \
+      "tailscale-hostname[text]=$(tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")')" \
+      "tailscale-ip[text]=$(tailscale ip -4)" > /dev/null
+  else
+    log "Item 'Marlboro NAS - Network' already exists, skipping"
+  fi
 fi
-
-# ─── Populate Bookmarks ───────────────────────────────────────────────────────
-
-log "Populating bookmarks with network details..."
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-STATIC_IP=$(op item get "Marlboro NAS — Network" --vault "$VAULT" --fields static-ip)
-TAILSCALE_HOSTNAME=$(op item get "Marlboro NAS — Network" --vault "$VAULT" --fields tailscale-hostname)
-
-sed -i "s|<your-static-ip>|${STATIC_IP}|g" "${SCRIPT_DIR}/bookmarks.html"
-sed -i "s|<your-tailscale-hostname>|${TAILSCALE_HOSTNAME}|g" "${SCRIPT_DIR}/bookmarks_tailscale.html"
-log "Bookmarks populated."
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Setup complete. Credentials saved to 1Password."
+echo "  Setup complete. .env written to: $ENV_FILE"
 echo "  Tag: $TAG | Vault: $VAULT"
 echo ""
-echo "  Manual steps still required:"
-echo "  • qBittorrent: get temp password from logs, then:"
-echo "    op item edit 'Marlboro NAS — qBittorrent' password=NEW"
-echo "  • Nginx Proxy Manager: change default at :81, then:"
-echo "    op item edit 'Marlboro NAS — Nginx Proxy Manager' password=NEW"
-echo "  • Portainer: set password on first launch at :9000, then:"
-echo "    op item edit 'Marlboro NAS — Portainer' password=NEW"
-echo "  • Sunshine: set password at :47990, then:"
-echo "    op item create --category Login --title 'Marlboro NAS — Sunshine'"
-echo "      --vault $VAULT --tags $TAG"
-echo "  • AdGuard: set password during setup wizard, then:"
-echo "    op item create --category Login --title 'Marlboro NAS — AdGuard'"
-echo "      --vault $VAULT --tags $TAG"
+echo "  Ready to run: docker compose up -d"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-log "Ready to run: op run --env-file=.op.env -- docker compose up -d"

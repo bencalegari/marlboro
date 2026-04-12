@@ -23,7 +23,9 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.1
 - **Nginx Proxy Manager** — Reverse proxy with Let's Encrypt
 - **Scrutiny** — Drive S.M.A.R.T. monitoring
 - **Watchtower** — Automatic container updates
+- **Uptime Kuma** — Uptime monitoring
 - **Glance** — Homelab dashboard
+- **DuckDNS** — Dynamic DNS for external access
 
 ---
 
@@ -53,33 +55,34 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.1
 | Nginx Proxy Manager (http) | 80 | |
 | Nginx Proxy Manager (https) | 443 | |
 | Scrutiny | 8085 | Internal container port is 8080 |
+| Uptime Kuma | 3002 | Internal container port is 3001 |
+| DuckDNS | — | No ports, DDNS updater only |
 | Sunshine web UI | 47990 HTTPS | Runs on host, not Docker |
 | Sunshine streaming | 47984, 47989 TCP | Moonlight ports |
 | Sunshine streaming | 47998–48000, 48010 UDP | Moonlight ports |
 
 ### Key Details
 
-Network info is stored in 1Password after running `setup.sh`. Retrieve with:
+Network info is stored in 1Password after running `setup_script.sh`. Retrieve with:
 
 ```bash
-op item get "Marlboro NAS — Network" --vault Private
+op item get "Marlboro NAS - Network" --vault Private
 ```
 
-- **Static IP:** `op item get "Marlboro NAS — Network" --vault Private --fields static-ip`
+- **Static IP:** `op item get "Marlboro NAS - Network" --vault Private --fields static-ip`
 - **Router/Gateway:** `<gateway-ip>`
 - **Network interface:** `<network-interface>`
-- **Tailscale hostname:** `op item get "Marlboro NAS — Network" --vault Private --fields tailscale-hostname`
-- **Tailscale IP:** `op item get "Marlboro NAS — Network" --vault Private --fields tailscale-ip`
+- **Tailscale hostname:** `op item get "Marlboro NAS - Network" --vault Private --fields tailscale-hostname`
+- **Tailscale IP:** `op item get "Marlboro NAS - Network" --vault Private --fields tailscale-ip`
 - **Username:** `<your-username>`
-- **Homelab directory:** `~/homelab`
+- **Homelab directory:** `~/marlboro`
 
 ### Customization Checklist
 
 **Required before first run:**
-- Run `setup.sh` — handles all credential generation and 1Password storage
+- Run `setup_script.sh` — handles all credential generation and 1Password storage
 - Update `PUID`/`PGID` (currently `1000`) if your user differs — check with `id`
-- Update Scrutiny device entries once drives arrive — run `lsblk`
-- Add IGDB and Screenscraper API keys to RomM (see Part 13.3)
+- IGDB and Screenscraper API keys must exist in 1Password (pulled by `setup_script.sh`)
 
 **Recommended:**
 - Router DHCP DNS set to `<server-ip>` ✅ done
@@ -93,7 +96,7 @@ op item get "Marlboro NAS — Network" --vault Private
 
 **`host.docker.internal` requires `extra_hosts` on Linux.** Added to Radarr, Sonarr, Bazarr, Profilarr, and Seerr in the compose file.
 
-**Docker needs explicit DNS.** `/etc/docker/daemon.json` must contain `{"dns": ["1.1.1.1", "8.8.8.8"]}`.
+**Docker needs explicit DNS and uses external data root.** `/etc/docker/daemon.json` must contain `{"data-root": "/mnt/tank/docker", "dns": ["1.1.1.1", "8.8.8.8"]}`.
 
 **AdGuard conflicts with systemd-resolved.** Fixed via `/etc/systemd/resolved.conf.d/adguard.conf` with `DNSStubListener=no`.
 
@@ -103,9 +106,9 @@ op item get "Marlboro NAS — Network" --vault Private
 
 **Sunshine runs as an AppImage** with Sway as the Wayland compositor. Managed via `systemctl --user`.
 
-**Scrutiny devices commented out** until drives arrive in Phase 2.
+**Scrutiny monitors all 4 drives** (`/dev/sda`–`/dev/sdd`) via device passthrough.
 
-**Seerr config lives in `./jellyseerr/config`** — the directory was kept from the Jellyseerr migration.
+**Seerr config lives in `./services/jellyseerr/config`** — the directory was kept from the Jellyseerr migration.
 
 ---
 
@@ -211,6 +214,7 @@ sudo vim /etc/docker/daemon.json
 
 ```json
 {
+  "data-root": "/mnt/tank/docker",
   "dns": ["1.1.1.1", "8.8.8.8"]
 }
 ```
@@ -256,7 +260,7 @@ Integrate with desktop app: **Settings → Developer → Integrate with 1Passwor
 op item list --tags marlboro-nas
 
 # Retrieve a password
-op item get "Marlboro NAS — Immich DB" --fields password --reveal
+op item get "Marlboro NAS - Immich DB" --fields password --reveal
 ```
 
 ---
@@ -264,13 +268,13 @@ op item get "Marlboro NAS — Immich DB" --fields password --reveal
 ## Part 4: Directory Structure
 
 ```bash
-mkdir -p ~/homelab/services/{jellyfin,prowlarr,radarr,sonarr,bazarr,profilarr,jellyseerr,qbittorrent,portainer,nginx-proxy-manager,uptime-kuma}/config
-mkdir -p ~/homelab/services/adguard/{work,conf}
-mkdir -p ~/homelab/services/immich/{model-cache,postgres}
-mkdir -p ~/homelab/services/romm/{db,resources,assets,config}
-mkdir -p ~/homelab/services/nginx-proxy-manager/letsencrypt
-mkdir -p ~/homelab/services/scrutiny/{config,influxdb}
-mkdir -p ~/homelab/services/glance/config
+mkdir -p ~/marlboro/services/{jellyfin,prowlarr,radarr,sonarr,bazarr,profilarr,jellyseerr,qbittorrent,portainer,nginx-proxy-manager,uptime-kuma}/config
+mkdir -p ~/marlboro/services/adguard/{work,conf}
+mkdir -p ~/marlboro/services/immich/{model-cache,postgres}
+mkdir -p ~/marlboro/services/romm/{db,resources,assets,config}
+mkdir -p ~/marlboro/services/nginx-proxy-manager/letsencrypt
+mkdir -p ~/marlboro/services/scrutiny/{config,influxdb}
+mkdir -p ~/marlboro/services/glance/config
 ```
 
 ---
@@ -278,24 +282,24 @@ mkdir -p ~/homelab/services/glance/config
 ## Part 5: Run the Setup Script
 
 ```bash
-chmod +x ~/homelab/setup.sh
-cd ~/homelab
-./setup.sh
+chmod +x ~/marlboro/setup_script.sh
+cd ~/marlboro
+./setup_script.sh
 ```
 
-Generates credentials, stores everything in 1Password tagged `marlboro-nas`, and captures network details. Docker Compose reads secrets at runtime via `op run` — no credentials are written to disk.
+Generates credentials, stores everything in 1Password tagged `marlboro-nas`, pulls all values, and writes `~/marlboro/.env`. Re-run anytime to sync credentials from 1Password.
 
 To start the stack:
 
 ```bash
-op run --env-file=.op.env -- docker compose up -d
+docker compose up -d
 ```
 
 ---
 
 ## Part 6: Glance Configuration
 
-Create `~/homelab/glance/config/glance.yml`:
+Create `~/marlboro/glance/config/glance.yml`:
 
 ```yaml
 server:
@@ -469,7 +473,7 @@ Access `https://<server-ip>:47990` (accept the self-signed cert warning). Set a 
 ```bash
 op item create \
   --category Login \
-  --title "Marlboro NAS — Sunshine" \
+  --title "Marlboro NAS - Sunshine" \
   --vault Private \
   --tags marlboro-nas \
   --url https://<server-ip>:47990 \
@@ -531,8 +535,8 @@ sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
 ### 9.2 Start the Stack
 
 ```bash
-cd ~/homelab
-op run --env-file=.op.env -- docker compose up -d
+cd ~/marlboro
+docker compose up -d
 docker compose ps
 ```
 
@@ -546,7 +550,7 @@ If AdGuard binds to port 80 instead of 3001 after setup:
 
 ```bash
 docker compose stop adguard
-vim ~/homelab/services/adguard/conf/AdGuardHome.yaml
+vim ~/marlboro/services/adguard/conf/AdGuardHome.yaml
 # Change: address: 0.0.0.0:80  →  address: 0.0.0.0:3001
 docker compose up -d adguard
 ```
@@ -556,7 +560,7 @@ Store credentials:
 ```bash
 op item create \
   --category Login \
-  --title "Marlboro NAS — AdGuard" \
+  --title "Marlboro NAS - AdGuard" \
   --vault Private \
   --tags marlboro-nas \
   --url http://<server-ip>:3001 \
@@ -590,7 +594,7 @@ Log in at `http://<server-ip>:8181`. If you see a plain "Unauthorized" page:
 
 ```bash
 docker compose stop qbittorrent
-vim ~/homelab/services/qbittorrent/config/qBittorrent/qBittorrent.conf
+vim ~/marlboro/services/qbittorrent/config/qBittorrent/qBittorrent.conf
 # Add under [Preferences]:
 # WebUI\HostHeaderValidation=false
 # WebUI\Port=8080
@@ -600,7 +604,7 @@ docker compose up -d qbittorrent
 Set permanent password in **Tools → Options → Web UI**, then:
 
 ```bash
-op item edit "Marlboro NAS — qBittorrent" password=your-new-password
+op item edit "Marlboro NAS - qBittorrent" password=your-new-password
 ```
 
 Downloads: **Tools → Options → Downloads**
@@ -679,7 +683,7 @@ Access `http://<server-ip>:9000`. **If headless, open from another device.** Set
 ```bash
 op item create \
   --category Login \
-  --title "Marlboro NAS — Portainer" \
+  --title "Marlboro NAS - Portainer" \
   --vault Private \
   --tags marlboro-nas \
   --url http://<server-ip>:9000 \
@@ -702,8 +706,8 @@ docker compose up -d immich-server immich-machine-learning
 If postgres fails with "directory is not empty":
 
 ```bash
-sudo rm -rf ~/homelab/services/immich/postgres
-mkdir -p ~/homelab/services/immich/postgres
+sudo rm -rf ~/marlboro/services/immich/postgres
+mkdir -p ~/marlboro/services/immich/postgres
 docker compose up -d immich-postgres
 ```
 
@@ -738,7 +742,11 @@ Navigate to `http://<server-ip>:7070`, create admin account.
 - **IGDB:** free Twitch developer account at https://dev.twitch.tv — get Client ID and Secret
 - **Screenscraper:** free account at https://screenscraper.fr
 
-Add API keys to `.op.env` (e.g. `IGDB_CLIENT_ID=op://Private/IGDB/client-id`) or set them directly in `docker-compose.yml` as empty optional env vars, then `op run --env-file=.op.env -- docker compose up -d romm`.
+These are stored in 1Password ("Marlboro NAS - IGDB" and "Marlboro NAS - Screenscraper") and pulled into `.env` by `setup_script.sh`. After adding them to 1Password, re-run:
+
+```bash
+./setup_script.sh && docker compose up -d romm
+```
 
 ### 13.4 ROM Folder Structure
 
@@ -816,54 +824,69 @@ tailscale ssh <your-username>@<tailscale-hostname>
 
 ## Part 17: Storage Setup
 
-### 17.1 Install ZFS
+### 17.1 Install btrfs Tools
 
 ```bash
-sudo apt install zfsutils-linux
+sudo apt install btrfs-progs
 ```
 
 ### 17.2 Identify Drives
 
 ```bash
 lsblk
-ls /dev/disk/by-id/
 ```
 
-Use `/dev/disk/by-id/` paths — stable across reboots.
+4x Seagate Barracuda 8TB (ST8000DM004) at `/dev/sda`–`/dev/sdd`.
 
-### 17.3 Create ZFS Pool
+### 17.3 Create btrfs Filesystem
+
+Data uses `single` profile (~29TiB usable), metadata uses `raid1` (duplicated on 2 drives).
 
 ```bash
-sudo zpool create -o ashift=12 tank raidz \
-  /dev/disk/by-id/ata-DRIVE1 \
-  /dev/disk/by-id/ata-DRIVE2 \
-  /dev/disk/by-id/ata-DRIVE3 \
-  /dev/disk/by-id/ata-DRIVE4
-
-sudo zfs set compression=lz4 tank
+sudo wipefs -a /dev/sda /dev/sdb /dev/sdc /dev/sdd
+sudo mkfs.btrfs -d single -m raid1 /dev/sda /dev/sdb /dev/sdc /dev/sdd -L tank
 ```
 
-### 17.4 Create Datasets
+### 17.4 Mount and Persist
 
 ```bash
-sudo zfs create tank/media
-sudo zfs create tank/media/movies
-sudo zfs create tank/media/tv
-sudo zfs create tank/media/roms
-sudo zfs create tank/downloads
-sudo zfs create tank/downloads/complete
-sudo zfs create tank/downloads/incomplete
-sudo zfs create tank/photos
+sudo mkdir -p /mnt/tank
+sudo mount /dev/sda /mnt/tank
+
+# Add to fstab (use the UUID from mkfs output)
+echo 'UUID=<your-uuid> /mnt/tank btrfs defaults,autodefrag,compress=zstd 0 0' | sudo tee -a /etc/fstab
+```
+
+### 17.5 Create Directory Structure
+
+```bash
+sudo mkdir -p /mnt/tank/{media,downloads,photos,media/roms}
 sudo chown -R 1000:1000 /mnt/tank
 ```
 
-### 17.5 Enable Scrutiny
-
-Uncomment devices in `docker-compose.yml`, update paths from `lsblk`:
+### 17.6 Move Docker Data Root
 
 ```bash
-vim ~/homelab/docker-compose.yml
-docker compose up -d scrutiny
+docker compose down
+sudo systemctl stop docker docker.socket
+sudo mkdir -p /mnt/tank/docker
+sudo rsync -aP /var/lib/docker/ /mnt/tank/docker/
+echo '{"data-root": "/mnt/tank/docker", "dns": ["1.1.1.1", "8.8.8.8"]}' | sudo tee /etc/docker/daemon.json
+sudo systemctl start docker
+docker compose up -d
+# Verify, then remove old data:
+sudo rm -rf /var/lib/docker
+```
+
+### 17.7 Create Immich Upload Directories
+
+Immich requires marker files in its upload subdirectories:
+
+```bash
+mkdir -p /mnt/tank/photos/{encoded-video,thumbs,upload,backups,library,profile}
+for dir in encoded-video thumbs upload backups library profile; do
+  touch "/mnt/tank/photos/$dir/.immich"
+done
 ```
 
 ---
@@ -877,20 +900,28 @@ docker compose pull
 docker compose up -d
 ```
 
-**ZFS health:**
+**btrfs health:**
 
 ```bash
-zpool status
-zpool scrub tank  # run monthly
+sudo btrfs scrub start /mnt/tank   # also runs monthly via /etc/cron.d/btrfs-scrub
+sudo btrfs scrub status /mnt/tank
+sudo btrfs filesystem show /mnt/tank
+sudo btrfs filesystem df /mnt/tank
 ```
 
-**Drive health:** `http://<server-ip>:8085`
+**Drive health:** `http://<server-ip>:8085` (Scrutiny)
 
-**ZFS snapshots:**
+**btrfs snapshots:**
 
 ```bash
-sudo zfs snapshot tank@$(date +%Y-%m-%d)
-sudo zfs list -t snapshot
+sudo btrfs subvolume snapshot -r /mnt/tank /mnt/tank/.snapshots/$(date +%Y-%m-%d)
+sudo btrfs subvolume list /mnt/tank
+```
+
+**Sync credentials from 1Password:**
+
+```bash
+cd ~/marlboro && ./setup_script.sh && docker compose up -d
 ```
 
 **Upgrade Ubuntu to 26.04 LTS (April 2026):**
