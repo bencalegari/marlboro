@@ -633,10 +633,12 @@ Sonarr: same, category `sonarr`.
 
 ### 10.5 Root Folders
 
+Media directories and ownership are created automatically by `setup_script.sh`. If you need to fix them manually:
+
 ```bash
-sudo mkdir -p /mnt/tank/media/movies /mnt/tank/media/tv
-sudo mkdir -p /mnt/tank/downloads/complete /mnt/tank/downloads/incomplete
-sudo chown -R 1000:1000 /mnt/tank
+docker run --rm -v /mnt/tank:/mnt/tank alpine chown 1000:1000 \
+  /mnt/tank/media/movies /mnt/tank/media/tv \
+  /mnt/tank/downloads/complete /mnt/tank/downloads/incomplete
 ```
 
 - Radarr: **Settings → Media Management → Root Folders** → `/movies`
@@ -863,6 +865,8 @@ echo 'UUID=<your-uuid> /mnt/tank btrfs defaults,autodefrag,compress=zstd 0 0' | 
 sudo mkdir -p /mnt/tank/{media,downloads,photos,media/roms}
 sudo chown -R 1000:1000 /mnt/tank
 ```
+
+> **Note:** `setup_script.sh` also creates media subdirectories and fixes their ownership on every run, so permission drift from Docker creating root-owned dirs is self-correcting.
 
 ### 17.6 Move Docker Data Root
 

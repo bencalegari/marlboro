@@ -119,6 +119,34 @@ chmod 600 "$ENV_FILE"
 
 log ".env written with $(grep -c '=' "$ENV_FILE") variables"
 
+# ─── Ensure Media Directories & Ownership ────────────────────────────────────
+
+MEDIA_DIRS=(/mnt/tank/media/movies /mnt/tank/media/tv /mnt/tank/downloads/complete /mnt/tank/downloads/incomplete)
+
+if [ -d /mnt/tank ]; then
+  for dir in "${MEDIA_DIRS[@]}"; do
+    [ -d "$dir" ] || mkdir -p "$dir"
+  done
+
+  needs_fix=false
+  for dir in "${MEDIA_DIRS[@]}"; do
+    owner=$(stat -c '%u:%g' "$dir")
+    if [ "$owner" != "1000:1000" ]; then
+      needs_fix=true
+      break
+    fi
+  done
+
+  if $needs_fix; then
+    log "Fixing media directory ownership (1000:1000)..."
+    docker run --rm -v /mnt/tank:/mnt/tank alpine chown 1000:1000 "${MEDIA_DIRS[@]}"
+  else
+    log "Media directory ownership OK"
+  fi
+else
+  log "WARNING: /mnt/tank not mounted — skipping media directory setup"
+fi
+
 # ─── Store Network Details ─────────────────────────────────────────────────────
 
 if command -v tailscale &>/dev/null; then
