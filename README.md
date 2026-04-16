@@ -667,6 +667,14 @@ Repeat in Sonarr.
    - Radarr: **2160p Remux** (LG C1 4K display)
    - Sonarr: **1080p Remux**
 4. Set sync to **Auto**, trigger manual sync immediately
+5. **After first sync**, edit Profilarr's local profile YAML to prefer individual episode downloads over season packs:
+
+   ```bash
+   docker exec profilarr sed -i '/^- name: Season Pack$/{n;s/score: 10/score: -10/}' \
+     "/config/db/profiles/1080p Remux.yml"
+   ```
+
+   > **Caveat:** If Profilarr pulls a fresh copy of the Dictionarry database, this YAML may be overwritten and the score reset to +10. Re-apply after database updates, or disable auto-pull in Profilarr settings.
 
 ### 10.9 Seerr
 
