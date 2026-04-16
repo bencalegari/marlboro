@@ -611,6 +611,23 @@ Downloads: **Tools → Options → Downloads**
 - Default Save Path: `/downloads/complete`
 - Incomplete: `/downloads/incomplete`
 
+**Install VueTorrent (alternative WebUI):**
+
+```bash
+curl -sL https://github.com/VueTorrent/VueTorrent/releases/latest/download/vuetorrent.zip \
+  -o /tmp/vuetorrent.zip
+unzip -o /tmp/vuetorrent.zip -d ~/marlboro/services/qbittorrent/config/
+```
+
+Then stop qBittorrent, add these lines under `[Preferences]` in `qBittorrent.conf`, and start it:
+
+```ini
+WebUI\AlternativeUIEnabled=true
+WebUI\RootFolder=/config/vuetorrent
+```
+
+To update VueTorrent later, re-run the `curl`/`unzip` commands and restart qBittorrent.
+
 ### 10.2 Flaresolverr → Prowlarr
 
 1. Prowlarr → **Settings → Indexer Proxies → Add → FlareSolverr**
