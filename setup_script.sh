@@ -147,6 +147,29 @@ else
   log "WARNING: /mnt/tank not mounted — skipping media directory setup"
 fi
 
+# ─── Ensure Docker Waits for /mnt/tank ───────────────────────────────────────
+# Docker's data-root is /mnt/tank/docker and every service bind-mounts paths
+# under /mnt/tank. If docker.service starts before the mount, it silently
+# binds onto empty dirs on the root fs, breaking imports with phantom "not
+# enough free space" errors. A RequiresMountsFor drop-in prevents the race.
+
+DOCKER_DROPIN=/etc/systemd/system/docker.service.d/wait-for-tank.conf
+DOCKER_DROPIN_CONTENT='[Unit]
+RequiresMountsFor=/mnt/tank
+'
+
+if ! sudo -n true 2>/dev/null; then
+  log "Skipping docker drop-in install (passwordless sudo unavailable) — run manually:"
+  echo "  sudo install -D -m 644 /dev/stdin $DOCKER_DROPIN <<< '$DOCKER_DROPIN_CONTENT'"
+  echo "  sudo systemctl daemon-reload"
+elif [ "$(sudo cat "$DOCKER_DROPIN" 2>/dev/null)" = "$DOCKER_DROPIN_CONTENT" ]; then
+  log "Docker wait-for-tank drop-in already present"
+else
+  log "Installing docker.service wait-for-tank drop-in..."
+  printf '%s' "$DOCKER_DROPIN_CONTENT" | sudo install -D -m 644 /dev/stdin "$DOCKER_DROPIN"
+  sudo systemctl daemon-reload
+fi
+
 # ─── Store Network Details ─────────────────────────────────────────────────────
 
 if command -v tailscale &>/dev/null; then

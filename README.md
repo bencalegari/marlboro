@@ -907,6 +907,20 @@ docker compose up -d
 sudo rm -rf /var/lib/docker
 ```
 
+### 17.7 Make Docker Wait for `/mnt/tank`
+
+Because the data root and every service bind mount live on `/mnt/tank`, Docker must not start before the mount is available. Without this, a boot race can leave containers bound to empty directories on the root filesystem — imports then fail with phantom "not enough free space" errors even though the tank has 29 TB free.
+
+```bash
+sudo install -D -m 644 /dev/stdin /etc/systemd/system/docker.service.d/wait-for-tank.conf <<'EOF'
+[Unit]
+RequiresMountsFor=/mnt/tank
+EOF
+sudo systemctl daemon-reload
+```
+
+`setup_script.sh` installs this drop-in on every run, so a fresh provision or a wiped system will re-apply it automatically.
+
 ### 17.7 Create Immich Upload Directories
 
 Immich requires marker files in its upload subdirectories:
