@@ -321,6 +321,8 @@ services:
     restart: unless-stopped
     networks:
       - homelab
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./services/nginx-proxy-manager/config:/data
       - ./services/nginx-proxy-manager/letsencrypt:/etc/letsencrypt
