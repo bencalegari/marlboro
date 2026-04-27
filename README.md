@@ -934,6 +934,97 @@ done
 
 ---
 
+## Part 19: Expose Jellyfin Externally via Nginx Proxy Manager
+
+This uses DuckDNS (`marlboro-bc.duckdns.org`) for dynamic DNS and NPM for the reverse proxy with a free Let's Encrypt TLS certificate. After this, Jellyfin is reachable at `https://jellyfin.marlboro-bc.duckdns.org` from anywhere on the internet.
+
+### 19.1 Forward Ports on the Router
+
+On your TP-Link BE3600 (**Advanced → NAT Forwarding → Virtual Servers**), forward both ports to `<server-ip>`:
+
+| External Port | Internal Port | Protocol | Notes |
+|---|---|---|---|
+| 80 | 80 | TCP | Let's Encrypt HTTP challenge |
+| 443 | 443 | TCP | HTTPS traffic |
+
+### 19.2 Verify DuckDNS Is Updating
+
+DuckDNS updates automatically via the container. Confirm it resolves to your current public IP:
+
+```bash
+dig +short marlboro-bc.duckdns.org
+curl -s ifconfig.me
+```
+
+Both should return the same IP. If the container isn't running, check:
+
+```bash
+docker logs duckdns
+```
+
+### 19.3 Restart NPM to Pick Up the New Config
+
+The `extra_hosts` change (needed so NPM can reach Jellyfin on the host network) requires a container restart:
+
+```bash
+cd ~/marlboro
+docker compose up -d nginx-proxy-manager
+```
+
+### 19.4 Create the Jellyfin Proxy Host in NPM
+
+1. Open NPM at `http://<server-ip>:81`
+2. **Proxy Hosts → Add Proxy Host**
+3. **Details tab:**
+   - Domain Names: `jellyfin.marlboro-bc.duckdns.org`
+   - Scheme: `http`
+   - Forward Hostname / IP: `host.docker.internal`
+   - Forward Port: `8096`
+   - Enable: **Websockets Support** (required for Jellyfin)
+4. **SSL tab:**
+   - SSL Certificate: **Request a new SSL Certificate**
+   - Provider: Let's Encrypt
+   - Email: your email address
+   - Enable: **Force SSL**
+   - Enable: **HTTP/2 Support**
+   - Agree to Terms of Service
+5. Click **Save** — NPM requests the cert via HTTP challenge on port 80
+
+### 19.5 Configure Jellyfin's Public URL
+
+In Jellyfin: **Dashboard → Networking**
+
+- **Server Address Settings → Public HTTPS port:** `443`
+- **Server Address Settings → Known Proxies:** add your server's LAN IP (e.g. `<server-ip>`)
+- **Server Address Settings → Base URL:** leave blank (using a subdomain, not a path)
+
+Save and restart Jellyfin if prompted.
+
+### 19.6 Test External Access
+
+From a device **not on your home network** (e.g. phone with Wi-Fi off):
+
+```
+https://jellyfin.marlboro-bc.duckdns.org
+```
+
+You should see the Jellyfin login page over HTTPS with a valid certificate.
+
+### 19.7 (Optional) Lock Down to Jellyfin Only
+
+If you only want to expose Jellyfin and not other services, no additional steps are needed — NPM only proxies hostnames you explicitly configure. Other services remain LAN/Tailscale-only.
+
+To block direct port access to Jellyfin's raw port (8096) from the internet while still allowing the proxy, add a UFW rule:
+
+```bash
+sudo ufw allow from 127.0.0.1 to any port 8096
+sudo ufw deny 8096
+```
+
+NPM communicates with Jellyfin via `host.docker.internal` which resolves to the host's bridge gateway address — traffic stays local, so this rule doesn't block the proxy.
+
+---
+
 ## Part 18: Maintenance
 
 **Update containers manually:**
