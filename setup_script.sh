@@ -80,6 +80,14 @@ ensure_password "Marlboro NAS - RomM DB"              "romm-user"
 ensure_password "Marlboro NAS - RomM DB Root"         "root"
 ensure_secret   "Marlboro NAS - RomM Auth Secret"     "romm" "$(openssl rand -hex 32)"
 
+# Coolify — APP_KEY must be "base64:" + base64(32 bytes) (Laravel format)
+ensure_secret   "Marlboro NAS - Coolify App Key"          "coolify" "base64:$(openssl rand -base64 32)"
+ensure_password "Marlboro NAS - Coolify DB"               "coolify"
+ensure_secret   "Marlboro NAS - Coolify Redis"            "coolify" "$(openssl rand -hex 32)"
+ensure_secret   "Marlboro NAS - Coolify Pusher App ID"    "coolify" "$(openssl rand -hex 8)"
+ensure_secret   "Marlboro NAS - Coolify Pusher App Key"   "coolify" "$(openssl rand -hex 16)"
+ensure_secret   "Marlboro NAS - Coolify Pusher Secret"    "coolify" "$(openssl rand -hex 32)"
+
 # DuckDNS token must be created manually — just warn if missing
 if ! op item get "Marlboro NAS - DuckDNS" --vault "$VAULT" &>/dev/null; then
   log "WARNING: 'Marlboro NAS - DuckDNS' not found in 1Password — DUCKDNS_TOKEN will be blank"
@@ -113,6 +121,12 @@ IGDB_CLIENT_ID=$(pull_field "Marlboro NAS - IGDB" client_id)
 IGDB_CLIENT_SECRET=$(pull_field "Marlboro NAS - IGDB" secret)
 SCREENSCRAPER_USER=$(pull_field "Marlboro NAS - Screenscraper" username)
 SCREENSCRAPER_PASSWORD=$(pull_field "Marlboro NAS - Screenscraper" password)
+COOLIFY_APP_KEY=$(pull_field "Marlboro NAS - Coolify App Key" password)
+COOLIFY_DB_PASSWORD=$(pull_field "Marlboro NAS - Coolify DB" password)
+COOLIFY_REDIS_PASSWORD=$(pull_field "Marlboro NAS - Coolify Redis" password)
+COOLIFY_PUSHER_APP_ID=$(pull_field "Marlboro NAS - Coolify Pusher App ID" password)
+COOLIFY_PUSHER_APP_KEY=$(pull_field "Marlboro NAS - Coolify Pusher App Key" password)
+COOLIFY_PUSHER_APP_SECRET=$(pull_field "Marlboro NAS - Coolify Pusher Secret" password)
 EOF
 
 chmod 600 "$ENV_FILE"

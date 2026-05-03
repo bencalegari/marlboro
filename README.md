@@ -1025,6 +1025,111 @@ NPM communicates with Jellyfin via `host.docker.internal` which resolves to the 
 
 ---
 
+## Part 20: Coolify
+
+Coolify is a self-hosted PaaS for deploying apps and managing servers via Docker. It runs alongside the existing stack with NPM as its reverse proxy. Coolify's built-in Traefik proxy is disabled so it doesn't conflict with NPM on ports 80/443.
+
+### 20.1 Create Directories
+
+```bash
+mkdir -p ~/marlboro/services/coolify/{app,postgres,redis,ssh}
+chmod 700 ~/marlboro/services/coolify/ssh
+sudo mkdir -p /data/coolify/source
+sudo chown $USER:$USER /data/coolify/source
+```
+
+The `/data/coolify/source` path is a fixed host path Coolify hard-codes internally — it must exist outside the repo directory.
+
+### 20.2 Run the Setup Script
+
+```bash
+cd ~/marlboro
+./setup_script.sh
+```
+
+The script will create these items in 1Password (vault: Private, tag: marlboro-nas):
+
+| 1Password Item | .env Variable |
+|---|---|
+| Marlboro NAS - Coolify App Key | `COOLIFY_APP_KEY` |
+| Marlboro NAS - Coolify DB | `COOLIFY_DB_PASSWORD` |
+| Marlboro NAS - Coolify Redis | `COOLIFY_REDIS_PASSWORD` |
+| Marlboro NAS - Coolify Pusher App ID | `COOLIFY_PUSHER_APP_ID` |
+| Marlboro NAS - Coolify Pusher App Key | `COOLIFY_PUSHER_APP_KEY` |
+| Marlboro NAS - Coolify Pusher Secret | `COOLIFY_PUSHER_APP_SECRET` |
+
+### 20.3 Start Coolify Services
+
+```bash
+docker compose up -d
+# Coolify runs Laravel DB migrations on first start — takes ~30 seconds
+docker compose logs -f coolify
+# Wait for "Application is ready" in the logs
+```
+
+The `depends_on` health checks ensure PostgreSQL is accepting connections before Coolify starts its migration.
+
+### 20.4 Configure NPM Proxy Host
+
+Open NPM at `http://<server-ip>:81` → **Proxy Hosts → Add Proxy Host**:
+
+- **Details tab:**
+  - Domain Names: `coolify.marlboro-bc.duckdns.org`
+  - Scheme: `http`
+  - Forward Hostname / IP: `coolify` (resolves via the `homelab` Docker network)
+  - Forward Port: `8000`
+  - Enable: **Websockets Support** (required for real-time log streaming)
+- **SSL tab:**
+  - SSL Certificate: Request a new SSL Certificate
+  - Email: your email
+  - Enable: Force SSL, HTTP/2 Support
+  - Agree to Terms of Service → Save
+
+### 20.5 AdGuard DNS Rewrite
+
+In AdGuard Home → **Filters → DNS Rewrites → Add DNS Rewrite**:
+- Domain: `coolify.marlboro-bc.duckdns.org`
+- Answer: `<server-ip>`
+
+This ensures the domain resolves to your LAN IP from inside the network.
+
+### 20.6 First Login & Admin Account
+
+Navigate to `https://coolify.marlboro-bc.duckdns.org`. On first access you'll see a registration form — create the admin account and store the credentials in 1Password:
+
+```bash
+op item create \
+  --category Login \
+  --title "Marlboro NAS - Coolify" \
+  --vault Private \
+  --tags marlboro-nas \
+  --url https://coolify.marlboro-bc.duckdns.org \
+  username=your@email.com \
+  password=your-chosen-password
+```
+
+### 20.7 Server Configuration Inside Coolify
+
+After login, Coolify will prompt you to add a server. Choose **Localhost** — Coolify communicates with the local Docker daemon via the mounted `/var/run/docker.sock`.
+
+**Skip any prompts to install Traefik or Caddy.** The env var `DISABLE_STANDALONE_MODE=true` prevents Coolify's built-in proxy from starting; NPM handles all TLS termination.
+
+### 20.8 Ports Used
+
+| Port | Purpose |
+|------|---------|
+| 8000 | Coolify web UI (also proxied via NPM) |
+| 6001 | Soketi WebSocket server (real-time events) |
+| 6002 | Soketi internal metrics |
+
+### 20.9 Caveats
+
+- **Coolify runs privileged.** Required for Docker management. The container has significant host access — expected for a PaaS tool.
+- **Postgres UID mismatch.** `postgres:15-alpine` runs as UID 999. If the DB fails to start with a permissions error, fix with: `sudo chown -R 999:999 ~/marlboro/services/coolify/postgres`
+- **`DISABLE_STANDALONE_MODE` naming.** This env var has changed across Coolify beta releases. If Traefik appears running inside the container, check Coolify's release notes — it may also be `STANDALONE_MODE=false` in some builds.
+
+---
+
 ## Part 18: Maintenance
 
 **Update containers manually:**

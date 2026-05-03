@@ -407,6 +407,110 @@ services:
       - immich-server
       - seerr
 
+  # ─── Application Platform ─────────────────────────────────────────────────
+
+  coolify-db:
+    container_name: coolify-db
+    image: postgres:15-alpine
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - POSTGRES_USER=coolify
+      - POSTGRES_PASSWORD=${COOLIFY_DB_PASSWORD}
+      - POSTGRES_DB=coolify
+    volumes:
+      - ./services/coolify/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coolify -d coolify"]
+      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  coolify-redis:
+    container_name: coolify-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - homelab
+    command: redis-server --requirepass ${COOLIFY_REDIS_PASSWORD} --save 60 1 --loglevel warning
+    volumes:
+      - ./services/coolify/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${COOLIFY_REDIS_PASSWORD}", "ping"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  coolify-realtime:
+    container_name: coolify-realtime
+    image: ghcr.io/coollabsio/coolify-realtime:latest
+    restart: unless-stopped
+    networks:
+      - homelab
+    ports:
+      - "6001:6001"
+      - "6002:6002"
+    environment:
+      - PUSHER_APP_ID=${COOLIFY_PUSHER_APP_ID}
+      - PUSHER_APP_KEY=${COOLIFY_PUSHER_APP_KEY}
+      - PUSHER_APP_SECRET=${COOLIFY_PUSHER_APP_SECRET}
+
+  coolify:
+    container_name: coolify
+    image: ghcr.io/coollabsio/coolify:latest
+    restart: unless-stopped
+    networks:
+      - homelab
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock.host
+      - /data/coolify/source:/data/coolify/source
+      - ./services/coolify/app:/data/coolify
+      - ./services/coolify/ssh:/var/www/html/.ssh
+    environment:
+      # App
+      - APP_KEY=${COOLIFY_APP_KEY}
+      - APP_ENV=production
+      - APP_DEBUG=false
+      - APP_URL=https://coolify.marlboro-bc.duckdns.org
+      # Database
+      - DB_CONNECTION=pgsql
+      - DB_HOST=coolify-db
+      - DB_PORT=5432
+      - DB_DATABASE=coolify
+      - DB_USERNAME=coolify
+      - DB_PASSWORD=${COOLIFY_DB_PASSWORD}
+      # Redis
+      - REDIS_HOST=coolify-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${COOLIFY_REDIS_PASSWORD}
+      # Queues/Sessions/Cache
+      - QUEUE_CONNECTION=redis
+      - SESSION_DRIVER=redis
+      - CACHE_DRIVER=redis
+      # WebSocket (Soketi)
+      - PUSHER_HOST=coolify-realtime
+      - PUSHER_PORT=6001
+      - PUSHER_SCHEME=http
+      - PUSHER_APP_ID=${COOLIFY_PUSHER_APP_ID}
+      - PUSHER_APP_KEY=${COOLIFY_PUSHER_APP_KEY}
+      - PUSHER_APP_SECRET=${COOLIFY_PUSHER_APP_SECRET}
+      # Disable built-in Traefik proxy (NPM handles TLS)
+      - DISABLE_STANDALONE_MODE=true
+    ports:
+      - "8000:8000"
+    depends_on:
+      coolify-db:
+        condition: service_healthy
+      coolify-redis:
+        condition: service_healthy
+      coolify-realtime:
+        condition: service_started
+
   # ─── Dynamic DNS ──────────────────────────────────────────────────────────
 
   duckdns:
