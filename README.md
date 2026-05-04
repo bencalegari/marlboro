@@ -940,12 +940,14 @@ This uses DuckDNS (`marlboro-bc.duckdns.org`) for dynamic DNS and NPM for the re
 
 ### 19.1 Forward Ports on the Router
 
-On your TP-Link BE3600 (**Advanced → NAT Forwarding → Virtual Servers**), forward both ports to `<server-ip>`:
+On your TP-Link BE3600 (**Advanced → NAT Forwarding → Virtual Servers**), forward to `<server-ip>`:
 
 | External Port | Internal Port | Protocol | Notes |
 |---|---|---|---|
-| 80 | 80 | TCP | Let's Encrypt HTTP challenge |
-| 443 | 443 | TCP | HTTPS traffic |
+| 443 | 443 | TCP | HTTPS traffic (required) |
+| 80 | 80 | TCP | Optional — only needed for `http://` → `https://` redirect. Many residential ISPs (e.g. Comcast) block inbound port 80, so we use a DNS-01 challenge for cert issuance instead. |
+
+> Cert issuance does **not** require port 80 in this setup — see 19.4.
 
 ### 19.2 Verify DuckDNS Is Updating
 
@@ -985,10 +987,20 @@ docker compose up -d nginx-proxy-manager
    - SSL Certificate: **Request a new SSL Certificate**
    - Provider: Let's Encrypt
    - Email: your email address
+   - Enable: **Use a DNS Challenge**
+   - DNS Provider: **DuckDNS**
+   - Credentials File Content:
+     ```
+     dns_duckdns_token=<your-duckdns-token>
+     ```
+     Same token as `DUCKDNS_TOKEN` in `.env` (used by the `duckdns` container). Get it from <https://www.duckdns.org>.
+   - Propagation Seconds: leave blank (default 30s is fine)
    - Enable: **Force SSL**
    - Enable: **HTTP/2 Support**
    - Agree to Terms of Service
-5. Click **Save** — NPM requests the cert via HTTP challenge on port 80
+5. Click **Save** — NPM installs `certbot-dns-duckdns` on first use, sets a TXT record at `_acme-challenge.marlboro-bc.duckdns.org` via the DuckDNS API, and Let's Encrypt validates the domain. No inbound port 80 required.
+
+> **Tip:** You can also request a wildcard cert by adding `*.marlboro-bc.duckdns.org` to Domain Names — DNS-01 is the only challenge type Let's Encrypt accepts for wildcards.
 
 ### 19.5 Configure Jellyfin's Public URL
 
@@ -1010,7 +1022,22 @@ https://jellyfin.marlboro-bc.duckdns.org
 
 You should see the Jellyfin login page over HTTPS with a valid certificate.
 
-### 19.7 (Optional) Lock Down to Jellyfin Only
+### 19.7 Troubleshooting: "Internal Error" When Requesting a Cert
+
+If NPM shows only "Internal Error" after submitting the cert request, check the container logs:
+
+```bash
+docker logs nginx-proxy-manager --tail 100
+docker exec nginx-proxy-manager tail -200 /data/logs/letsencrypt.log
+```
+
+Common causes:
+
+- **`Timeout during connect (likely firewall problem)` on port 80** — the HTTP-01 challenge can't reach your server. Either port 80 isn't forwarded to `<server-ip>`, or your ISP blocks inbound 80 (common on residential Comcast). **Fix:** use DNS-01 as described in 19.4 instead of HTTP-01.
+- **`unauthorized` from DuckDNS** — `dns_duckdns_token` is wrong or missing. Re-copy from <https://www.duckdns.org> and re-save the cert.
+- **Rate limit hit** — Let's Encrypt limits failed validations to 5/hour and certs to 5/week per registered domain. Wait an hour and retry, ideally after fixing the underlying cause.
+
+### 19.8 (Optional) Lock Down to Jellyfin Only
 
 If you only want to expose Jellyfin and not other services, no additional steps are needed — NPM only proxies hostnames you explicitly configure. Other services remain LAN/Tailscale-only.
 
@@ -1080,10 +1107,22 @@ Open NPM at `http://<server-ip>:81` → **Proxy Hosts → Add Proxy Host**:
   - Forward Port: `8000`
   - Enable: **Websockets Support** (required for real-time log streaming)
 - **SSL tab:**
-  - SSL Certificate: Request a new SSL Certificate
-  - Email: your email
-  - Enable: Force SSL, HTTP/2 Support
+  - SSL Certificate: **Request a new SSL Certificate**
+  - Provider: Let's Encrypt
+  - Email: your email address
+  - Enable: **Use a DNS Challenge**
+  - DNS Provider: **DuckDNS**
+  - Credentials File Content:
+    ```
+    dns_duckdns_token=<your-duckdns-token>
+    ```
+    Same token as `DUCKDNS_TOKEN` in `.env`. Get it from <https://www.duckdns.org>.
+  - Propagation Seconds: leave blank (default 30s is fine)
+  - Enable: **Force SSL**
+  - Enable: **HTTP/2 Support**
   - Agree to Terms of Service → Save
+
+> **Why DNS-01:** residential ISPs (e.g. Comcast) block inbound port 80, so HTTP-01 challenges time out. DNS-01 validates by writing a TXT record to `_acme-challenge.marlboro-bc.duckdns.org` via the DuckDNS API — no port 80 required. Same approach as 19.4 (Jellyfin).
 
 ### 20.5 AdGuard DNS Rewrite
 

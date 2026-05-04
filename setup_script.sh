@@ -174,13 +174,16 @@ RequiresMountsFor=/mnt/tank
 
 if ! sudo -n true 2>/dev/null; then
   log "Skipping docker drop-in install (passwordless sudo unavailable) — run manually:"
-  echo "  sudo install -D -m 644 /dev/stdin $DOCKER_DROPIN <<< '$DOCKER_DROPIN_CONTENT'"
-  echo "  sudo systemctl daemon-reload"
+  echo "  sudo mkdir -p $(dirname "$DOCKER_DROPIN")"
+  echo "  printf '%s' '$DOCKER_DROPIN_CONTENT' | sudo tee $DOCKER_DROPIN >/dev/null"
+  echo "  sudo chmod 644 $DOCKER_DROPIN && sudo systemctl daemon-reload"
 elif [ "$(sudo cat "$DOCKER_DROPIN" 2>/dev/null)" = "$DOCKER_DROPIN_CONTENT" ]; then
   log "Docker wait-for-tank drop-in already present"
 else
   log "Installing docker.service wait-for-tank drop-in..."
-  printf '%s' "$DOCKER_DROPIN_CONTENT" | sudo install -D -m 644 /dev/stdin "$DOCKER_DROPIN"
+  sudo mkdir -p "$(dirname "$DOCKER_DROPIN")"
+  printf '%s' "$DOCKER_DROPIN_CONTENT" | sudo tee "$DOCKER_DROPIN" >/dev/null
+  sudo chmod 644 "$DOCKER_DROPIN"
   sudo systemctl daemon-reload
 fi
 
