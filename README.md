@@ -94,7 +94,7 @@ op item get "Marlboro NAS - Network" --vault Private
 
 **Jellyfin uses host networking.** Reference it from other containers via `http://host.docker.internal:8096` or `http://<server-ip>:8096`, not `http://jellyfin:8096`.
 
-**`host.docker.internal` requires `extra_hosts` on Linux.** Added to Radarr, Sonarr, Bazarr, Profilarr, and Seerr in the compose file.
+**`host.docker.internal` requires `extra_hosts` on Linux.** Added to Radarr, Sonarr, Bazarr, Profilarr, Seerr, and Coolify in the compose file.
 
 **Docker needs explicit DNS and uses external data root.** `/etc/docker/daemon.json` must contain `{"data-root": "/mnt/tank/docker", "dns": ["1.1.1.1", "8.8.8.8"]}`.
 
@@ -949,6 +949,8 @@ On your TP-Link BE3600 (**Advanced → NAT Forwarding → Virtual Servers**), fo
 
 > Cert issuance does **not** require port 80 in this setup — see 19.4.
 
+> **Heads up — double NAT:** if the TP-Link's WAN is plugged into another router (not directly into the modem), traffic to your public IP hits that upstream router first and never reaches the TP-Link's forward rule. To check, look at the TP-Link's WAN IP — if it's a private address (e.g. `192.168.1.x`), you're double-NATted. See [`UPSTREAM_ROUTER_FORWARDING.md`](./UPSTREAM_ROUTER_FORWARDING.md) for the fix. As a workaround that bypasses NAT entirely, Tailscale Funnel can expose a service publicly without any port forwarding (`sudo tailscale funnel --bg http://localhost:8096`).
+
 ### 19.2 Verify DuckDNS Is Updating
 
 DuckDNS updates automatically via the container. Confirm it resolves to your current public IP:
@@ -1104,7 +1106,7 @@ Open NPM at `http://<server-ip>:81` → **Proxy Hosts → Add Proxy Host**:
   - Domain Names: `coolify.marlboro-bc.duckdns.org`
   - Scheme: `http`
   - Forward Hostname / IP: `coolify` (resolves via the `homelab` Docker network)
-  - Forward Port: `8000`
+  - Forward Port: `8080` (nginx inside the container; the `8000:8080` host mapping is for direct access / Tailscale Funnel)
   - Enable: **Websockets Support** (required for real-time log streaming)
 - **SSL tab:**
   - SSL Certificate: **Request a new SSL Certificate**
@@ -1149,7 +1151,7 @@ op item create \
 
 ### 20.7 Server Configuration Inside Coolify
 
-After login, Coolify will prompt you to add a server. Choose **Localhost** — Coolify communicates with the local Docker daemon via the mounted `/var/run/docker.sock`.
+After login, Coolify will prompt you to add a server. Choose **This Machine** (older builds called this "Localhost") — Coolify communicates with the local Docker daemon via the mounted `/var/run/docker.sock`.
 
 **Skip any prompts to install Traefik or Caddy.** The env var `DISABLE_STANDALONE_MODE=true` prevents Coolify's built-in proxy from starting; NPM handles all TLS termination.
 

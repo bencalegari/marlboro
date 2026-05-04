@@ -464,6 +464,8 @@ services:
     restart: unless-stopped
     networks:
       - homelab
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     privileged: true
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -502,7 +504,7 @@ services:
       # Disable built-in Traefik proxy (NPM handles TLS)
       - DISABLE_STANDALONE_MODE=true
     ports:
-      - "8000:8000"
+      - "8000:8080"
     depends_on:
       coolify-db:
         condition: service_healthy
