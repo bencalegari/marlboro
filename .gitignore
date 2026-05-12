@@ -10,7 +10,14 @@
 *.pfx
 
 # All service runtime data (add new services under services/ and this covers them)
-services/
+services/*
+
+# Exception: glance.yml is config we author, not runtime state the app mutates
+!services/glance/
+services/glance/*
+!services/glance/config/
+services/glance/config/*
+!services/glance/config/glance.yml
 
 # Media & downloads
 media/

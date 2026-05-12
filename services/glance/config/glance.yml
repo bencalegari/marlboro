@@ -1,0 +1,528 @@
+server:
+  port: 8080
+
+pages:
+  - name: Home
+    columns:
+
+      # ──────────────────────────────────────────────────────────────────────
+      # COLUMN 1 — small (left)
+      # ──────────────────────────────────────────────────────────────────────
+      - size: small
+        widgets:
+          - type: server-stats
+            servers:
+              - type: local
+                mountpoints:
+                  "/":
+                    name: Root
+                  "/mnt/tank":
+                    name: Tank
+
+          - type: clock
+            hour-format: 12h
+
+          - type: weather
+            location: San Francisco, California, US
+            units: imperial
+            hour-format: 12h
+
+          # ── Sonarr — recent downloads
+          - type: custom-api
+            title: Sonarr
+            title-url: http://192.168.0.10:8989
+            cache: 30m
+            options:
+              service: sonarr
+              type: recent
+              size: small
+              collapse-after: 3
+              show-grabbed: false
+              interval: 30
+              api-base-url: http://sonarr:8989
+              key: ${SONARR_API_KEY}
+              url: http://192.168.0.10:8989/
+            template: &arr_template |
+              {{ $collapseAfter := .Options.IntOr "collapse-after" 5 }}
+              {{ $showGrabbed := .Options.BoolOr "show-grabbed" false }}
+              {{ $sortTime := .Options.StringOr "sort-time" "desc" }}
+              {{ $coverProxy := .Options.StringOr "cover-proxy" "" }}
+              {{ $size := .Options.StringOr "size" "medium" }}
+              {{ $service := .Options.StringOr "service" "" }}
+              {{ $type := .Options.StringOr "type" "" }}
+              {{ $intervalH := .Options.IntOr "interval" 0 | mul 24 }}
+
+              {{ $now := now | formatTime "2006-01-02T15:04:05" }}
+              {{ $posInterval := (offsetNow (printf "+%dh" $intervalH)) | formatTime "2006-01-02T15:04:05" }}
+              {{ $negInterval := (offsetNow (printf "-%dh" $intervalH)) | formatTime "2006-01-02T15:04:05" }}
+
+              {{ $apiBaseUrl := .Options.StringOr "api-base-url" "" }}
+              {{ $key := .Options.StringOr "key" "" }}
+              {{ $url := .Options.StringOr "url" $apiBaseUrl }}
+
+              {{ if or (and (ne $service "sonarr") (ne $service "radarr") (ne $service "lidarr"))
+                      (and (ne $type "upcoming") (ne $type "recent") (ne $type "missing"))
+                      (eq $apiBaseUrl "") (eq $key "") (eq $url "") }}
+                <div class="widget-error-header">
+                    <div class="color-negative size-h3">ERROR</div>
+                  </div>
+                  <p class="break-all">Some options are not set or malformed</p>
+              {{ else }}
+                {{ $requestUrl := "" }}
+
+                {{ if eq $service "sonarr" }}
+                  {{ if eq $type "recent" }}
+                    {{ $requestUrl = printf "%s/api/v3/history/since?includeSeries=true&includeEpisode=true&eventType=grabbed&date=%s" $apiBaseUrl $negInterval }}
+                  {{ else if eq $type "missing" }}
+                    {{ $requestUrl = printf "%s/api/v3/wanted/missing?page=1&pageSize=50&includeSeries=true" $apiBaseUrl }}
+                  {{ else if eq $type "upcoming" }}
+                    {{ $requestUrl = printf "%s/api/v3/calendar?includeSeries=true&start=%s&end=%s" $apiBaseUrl $now $posInterval }}
+                  {{ end }}
+                {{ else if eq $service "radarr" }}
+                  {{ if eq $type "recent" }}
+                    {{ $requestUrl = printf "%s/api/v3/history/since?includeMovie=true&eventType=grabbed&date=%s" $apiBaseUrl $negInterval }}
+                  {{ else if eq $type "missing" }}
+                    {{ $requestUrl = printf "%s/api/v3/wanted/missing?page=1&pageSize=50" $apiBaseUrl }}
+                  {{ else if eq $type "upcoming" }}
+                    {{ $requestUrl = printf "%s/api/v3/calendar?start=%s&end=%s" $apiBaseUrl $now $posInterval }}
+                  {{ end }}
+                {{ end }}
+
+                {{ $data := newRequest $requestUrl
+                  | withHeader "Accept" "application/json"
+                  | withHeader "X-Api-Key" $key
+                  | getResponse }}
+
+                <ul class="list list-gap-14 collapsible-container single-line-titles" data-collapse-after="{{ $collapseAfter }}">
+                  {{ $array := "" }}
+                  {{ $sortByField := "" }}
+                  {{ $itemDisplayed := false }}
+                  {{ $itemDate := "" }}
+                  {{ $isAvailable := false }}
+
+                  {{ if eq $type "missing" }}
+                    {{ $array = "records" }}
+                    {{ if eq $service "sonarr" }}
+                      {{ $sortByField = "airDateUtc" }}
+                    {{ else }}
+                      {{ $sortByField = "releaseDate" }}
+                    {{ end }}
+                  {{ else if eq $type "recent" }}
+                    {{ $sortByField = "date" }}
+                  {{ else }}
+                    {{ if eq $service "sonarr" }}
+                      {{ $sortByField = "airDateUtc" }}
+                    {{ else }}
+                      {{ $sortByField = "releaseDate" }}
+                    {{ end }}
+                  {{ end }}
+
+                  {{ range $data.JSON.Array $array | sortByTime $sortByField "rfc3339" $sortTime }}
+
+                    {{ if eq $service "sonarr" }}
+                      {{ $itemDate = .String "airDateUtc" | parseTime "RFC3339" }}
+                      {{ $itemDate = $itemDate.In now.Location | formatTime "2006-01-02T15:04:05" }}
+                      {{ $isAvailable = true }}
+                    {{ else if eq $service "radarr"}}
+                      {{ $isAvailable = .Bool "isAvailable" }}
+                      {{ $itemDate = .String "releaseDate" }}
+                    {{ end }}
+
+                    {{ if or (eq $type "upcoming") (eq $type "recent") (and (or (and (gt $itemDate $negInterval) ((lt $itemDate $now ))) (eq $intervalH 0))  $isAvailable) }}
+                      {{ $itemDisplayed = true }}
+                      {{ $title := "" }}
+                      {{ $subtitle := "" }}
+                      {{ $coverUrl := "" }}
+                      {{ $status := "" }}
+                      {{ $coverBase := "" }}
+                      {{ $height := "" }}
+                      {{ $width := "" }}
+                      {{ $popoverTitle := "" }}
+                      {{ $popoverSubtitle := "" }}
+                      {{ $popoverSummary := "" }}
+                      {{ $summary := "" }}
+                      {{ $link := "" }}
+                      {{ $grabbed := false }}
+                      {{ $date := now }}
+                      {{ $datetype := "" }}
+                      {{ $seString := "" }}
+                      {{ $genres := "" }}
+                      {{ $buttonJustify := "left" }}
+
+                      {{ if eq $service "sonarr" }}
+                        {{ $series := "" }}
+                        {{ $coverBase = printf "%s/api/v3/mediacover" $apiBaseUrl }}
+                        {{ $coverUrl = printf "%s/%s/poster-500.jpg?apikey=%s" $coverBase (.String "seriesId") $key }}
+                        {{ $title = .String "series.title" }}
+                        {{ $link = printf "%s/series/%s#" $url (.String "series.titleSlug") }}
+                        {{ $series = .Get "series" }}
+                        {{ $genres = $series.Get "genres" }}
+
+                        {{ if eq $type "recent" }}
+                          {{ $date = .String "date" | parseLocalTime "RFC3339" }}
+                          {{ $date = $date.In now.Location }}
+                          {{ $subtitle = .String "episode.title" }}
+                          {{ $summary = .String "episode.overview" }}
+                          {{ $seString = printf "S%02dE%02d" (.Int "episode.seasonNumber") (.Int "episode.episodeNumber") }}
+                          {{ $datetype = "Downloaded" }}
+                          {{ $popoverTitle = .String "series.title" }}
+                          {{ $popoverSummary = .String "series.overview" }}
+                        {{ else if eq $type "missing" }}
+                          {{ $date = .String "airDateUtc" | parseLocalTime "RFC3339" }}
+                          {{ $date = $date.In now.Location }}
+                          {{ $subtitle = .String "title" }}
+                          {{ $summary = .String "overview" }}
+                          {{ $seString = printf "S%02dE%02d" (.Int "seasonNumber") (.Int "episodeNumber") }}
+                          {{ $datetype = "Aired" }}
+                          {{ $popoverTitle = .String "series.title" }}
+                          {{ $popoverSummary = .String "series.overview" }}
+                        {{ else if eq $type "upcoming" }}
+                          {{ $date = .String "airDateUtc" | parseLocalTime "RFC3339" }}
+                          {{ $date = $date.In now.Location }}
+                          {{ $subtitle = .String "title" }}
+                          {{ $summary = .String "overview" }}
+                          {{ $seString = printf "S%02dE%02d" (.Int "seasonNumber") (.Int "episodeNumber") }}
+                          {{ $datetype = "Airs" }}
+                          {{ $popoverTitle = .String "series.title" }}
+                          {{ $popoverSummary = .String "series.overview" }}
+                        {{ end }}
+
+                      {{ else if eq $service "radarr" }}
+                        {{ $movie := "" }}
+                        {{ $status = .String "status" }}
+                        {{ $coverBase = printf "%s/api/v3/mediacover" $apiBaseUrl }}
+                        {{ if eq $status "announced"}}
+                          {{ if ne (.String "inCinemas") "" }}
+                            {{ $date = (.String "inCinemas" | parseTime "RFC3339") }}
+                            {{ $datetype = "In Cinemas" }}
+                          {{ else }}
+                            {{ $date = (.String "releaseDate" | parseTime "RFC3339") }}
+                            {{ $datetype = "Releases" }}
+                          {{ end }}
+                        {{ else if eq $status "inCinemas"}}
+                          {{ $date = (.String "releaseDate" | parseTime "RFC3339") }}
+                          {{ $datetype = "Releases" }}
+                        {{ else if eq $status "released"}}
+                          {{ $date = (.String "releaseDate" | parseTime "RFC3339") }}
+                          {{ $datetype = "Released" }}
+                        {{ end }}
+
+                        {{ if eq $type "recent" }}
+                          {{ $coverUrl = printf "%s/%s/poster-500.jpg?apikey=%s" $coverBase (.String "movie.id") $key }}
+                          {{ $datetype = "Downloaded" }}
+                          {{ $date = (.String "date" | parseTime "RFC3339") }}
+                          {{ $title = .String "movie.title" }}
+                          {{ $summary = .String "movie.overview" }}
+                          {{ $popoverTitle = .String "movie.title" }}
+                          {{ $popoverSubtitle = printf "%s %s" $datetype ($date | formatTime "1/2/2006") }}
+                          {{ $popoverSummary = .String "movie.overview" }}
+                          {{ $link = printf "%s/movie/%s#" $url (.String "movie.titleSlug") }}
+                          {{ $movie = .Get "movie" }}
+                          {{ $genres = $movie.Get "genres" }}
+                        {{ else }}
+                          {{ $coverUrl = printf "%s/%s/poster-500.jpg?apikey=%s" $coverBase (.String "id") $key }}
+                          {{ $title = .String "title" }}
+                          {{ $summary = .String "overview" }}
+                          {{ $link = printf "%s/movie/%s#" $url (.String "titleSlug") }}
+                          {{ $popoverTitle = .String "title" }}
+                          {{ $popoverSubtitle = printf "%s %s" $datetype ($date | formatTime "1/2/2006") }}
+                          {{ $popoverSummary = .String "overview" }}
+                          {{ $genres = .Get "genres" }}
+                        {{ end }}
+                      {{ end }}
+
+                      {{ if eq $size "small" }}
+                        {{ $buttonJustify = "right" }}
+                        {{ $height = "9rem" }}
+                        {{ $width = "6rem" }}
+                      {{ else if eq $size "medium" }}
+                        {{ $height = "12rem" }}
+                        {{ $width = "8rem" }}
+                      {{ else if eq $size "large" }}
+                        {{ $height = "15rem" }}
+                        {{ $width = "10rem" }}
+                      {{ end }}
+
+                      <li style="position: relative;">
+                        <div class="flex gap-10 items-start thumbnail-container thumbnail-parent">
+                          <div>
+                            <div data-popover-type="html" data-popover-position="above" data-popover-show-delay="500" style="width: {{ $width  }}; height: {{ $height }}; align-content: center;">
+                              <div data-popover-html>
+                                <div style="margin: 5px;">
+                                  <strong class="size-h4 color-primary" title="{{ $popoverTitle }}">{{ $popoverTitle }}</strong>
+                                  <div class="size-h4 text-truncate text-very-compact color-subdue" title="{{ $popoverSubtitle }}">{{ $popoverSubtitle }}</div>
+                                  <p class="margin-top-20" style="overflow-y: auto; text-align: justify; max-height: 20rem;">
+                                    {{ if ne $popoverSummary "" }}{{ $popoverSummary }}{{ else }}TBA{{ end }}
+                                  </p>
+                                  {{ if gt (len ($genres.Array "")) 0 }}
+                                  <ul class="attachments margin-top-20">
+                                    {{ range $genres.Array "" }}<li>{{ .String "" }}</li>{{ end }}
+                                  </ul>
+                                  {{ end }}
+                                </div>
+                              </div>
+                              <img class="thumbnail" src="{{ $coverUrl }}" alt="Cover" loading="lazy" style="width: 100%; height: 100%; box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1); object-fit: cover; border-radius: 0.5rem;">
+                            </div>
+                          </div>
+                          <div class="shrink min-width-0" style="height: 9rem; position: relative; padding-top: 5px; padding-right: 5px;">
+                            <strong class="size-h4 block text-truncate color-primary" title="{{ $title }}">{{ $title }}</strong>
+                            <div class="text-truncate text-very-compact" title="{{ $subtitle }}">{{ $subtitle }}</div>
+                            <div class="text-very-compact text-truncate">
+                              {{ if eq $service "sonarr" }}
+                                <div>{{ $seString }} - {{ $datetype }} {{ $date.Format "1/2 03:04PM" }}</div>
+                              {{ else }}
+                                <span>{{ $datetype }} {{ $date.Format "1/2" }}</span>
+                              {{ end }}
+                            </div>
+                            <div class="{{ if eq $size "small" }}text-truncate{{ if eq $service "radarr" }} margin-top-5{{ end }}{{ else }}text-truncate-2-lines margin-top-5{{ end }}">
+                              {{ $summary }}
+                            </div>
+                          </div>
+                        </div>
+                      </li>
+                    {{ end }}
+                  {{ end }}
+                  {{ if not $itemDisplayed }}
+                    <li>No items found.</li>
+                  {{ end }}
+                </ul>
+              {{ end }}
+
+          # ── Radarr — recent downloads (reuses Sonarr/Radarr template via YAML anchor)
+          - type: custom-api
+            title: Radarr
+            title-url: http://192.168.0.10:7878
+            cache: 30m
+            options:
+              service: radarr
+              type: recent
+              size: small
+              collapse-after: 3
+              show-grabbed: false
+              interval: 30
+              api-base-url: http://radarr:7878
+              key: ${RADARR_API_KEY}
+              url: http://192.168.0.10:7878/
+            template: *arr_template
+
+      # ──────────────────────────────────────────────────────────────────────
+      # COLUMN 2 — full (middle)
+      # ──────────────────────────────────────────────────────────────────────
+      - size: full
+        widgets:
+          - type: docker-containers
+
+          - type: monitor
+            title: Services
+            sites:
+              - title: Jellyfin
+                url: http://192.168.0.10:8096
+                same-tab: true
+              - title: Jellyfin (External)
+                url: http://marlboro-bc.duckdns.org
+              - title: AdGuard Home
+                url: http://adguard:3001
+                same-tab: true
+              - title: Sunshine
+                url: https://192.168.0.10:47990
+                allow-insecure: true
+                same-tab: true
+              - title: Prowlarr
+                url: http://prowlarr:9696
+                same-tab: true
+              - title: Radarr
+                url: http://radarr:7878
+                same-tab: true
+              - title: Sonarr
+                url: http://sonarr:8989
+                same-tab: true
+              - title: Bazarr
+                url: http://bazarr:6767
+                same-tab: true
+              - title: Seerr
+                url: http://seerr:5055
+                same-tab: true
+              - title: Profilarr
+                url: http://profilarr:6868
+                same-tab: true
+              - title: qBittorrent
+                url: http://qbittorrent:8080
+                same-tab: true
+              - title: Immich
+                url: http://immich-server:2283
+                same-tab: true
+              - title: Portainer
+                url: http://portainer:9000
+                same-tab: true
+              - title: Nginx Proxy Manager
+                url: http://nginx-proxy-manager:81
+                same-tab: true
+              - title: Scrutiny
+                url: http://scrutiny:8080
+                same-tab: true
+
+          - type: bookmarks
+            groups:
+              - title: Marlboro (Local)
+                links:
+                  - title: Glance
+                    url: http://192.168.0.10:8080
+                  - title: AdGuard Home
+                    url: http://192.168.0.10:3001
+                  - title: Jellyfin
+                    url: http://192.168.0.10:8096
+                  - title: Seerr
+                    url: http://192.168.0.10:5055
+                  - title: Prowlarr
+                    url: http://192.168.0.10:9696
+                  - title: Radarr
+                    url: http://192.168.0.10:7878
+                  - title: Sonarr
+                    url: http://192.168.0.10:8989
+                  - title: Bazarr
+                    url: http://192.168.0.10:6767
+                  - title: Profilarr
+                    url: http://192.168.0.10:6868
+                  - title: qBittorrent
+                    url: http://192.168.0.10:8181
+                  - title: Immich
+                    url: http://192.168.0.10:2283
+                  - title: RomM
+                    url: http://192.168.0.10:7070
+                  - title: Portainer
+                    url: http://192.168.0.10:9000
+                  - title: Nginx Proxy Manager
+                    url: http://192.168.0.10:81
+                  - title: Uptime Kuma
+                    url: http://192.168.0.10:3002
+                  - title: Scrutiny
+                    url: http://192.168.0.10:8085
+                  - title: Sunshine
+                    url: https://192.168.0.10:47990
+              - title: Marlboro (Tailscale)
+                links:
+                  - title: Glance
+                    url: http://${TAILSCALE_HOSTNAME}:8080
+                  - title: AdGuard Home
+                    url: http://${TAILSCALE_HOSTNAME}:3001
+                  - title: Jellyfin
+                    url: http://${TAILSCALE_HOSTNAME}:8096
+                  - title: Seerr
+                    url: http://${TAILSCALE_HOSTNAME}:5055
+                  - title: Prowlarr
+                    url: http://${TAILSCALE_HOSTNAME}:9696
+                  - title: Radarr
+                    url: http://${TAILSCALE_HOSTNAME}:7878
+                  - title: Sonarr
+                    url: http://${TAILSCALE_HOSTNAME}:8989
+                  - title: Bazarr
+                    url: http://${TAILSCALE_HOSTNAME}:6767
+                  - title: Profilarr
+                    url: http://${TAILSCALE_HOSTNAME}:6868
+                  - title: qBittorrent
+                    url: http://${TAILSCALE_HOSTNAME}:8181
+                  - title: Immich
+                    url: http://${TAILSCALE_HOSTNAME}:2283
+                  - title: RomM
+                    url: http://${TAILSCALE_HOSTNAME}:7070
+                  - title: Portainer
+                    url: http://${TAILSCALE_HOSTNAME}:9000
+                  - title: Nginx Proxy Manager
+                    url: http://${TAILSCALE_HOSTNAME}:81
+                  - title: Uptime Kuma
+                    url: http://${TAILSCALE_HOSTNAME}:3002
+                  - title: Scrutiny
+                    url: http://${TAILSCALE_HOSTNAME}:8085
+                  - title: Sunshine
+                    url: https://${TAILSCALE_HOSTNAME}:47990
+              - title: External
+                links:
+                  - title: Jellyfin (DuckDNS)
+                    url: http://marlboro-bc.duckdns.org
+                  - title: Coolify
+                    url: https://coolify.marlboro-bc.duckdns.org
+                  - title: Tailscale Admin
+                    url: https://login.tailscale.com/admin/machines
+                  - title: Router
+                    url: http://192.168.0.1
+
+      # ──────────────────────────────────────────────────────────────────────
+      # COLUMN 3 — small (right)
+      # ──────────────────────────────────────────────────────────────────────
+      - size: small
+        widgets:
+          # ── Internet (public IP / ISP / location)
+          - type: custom-api
+            title: Internet
+            cache: 30m
+            url: https://ipinfo.io/json
+            template: |
+              <div style="display: flex; flex-direction: column; align-items: center; gap: 5px;">
+                <div style="font-size: 1.6rem; font-weight: bold; color: var(--color-primary);">
+                  {{ .JSON.String "ip" }}
+                </div>
+                <div style="font-size: 1.1rem; opacity: 0.8; font-weight: 500;">
+                  📍 {{ .JSON.String "city" }}, {{ .JSON.String "region" }}
+                </div>
+                <div style="font-size: 1rem; opacity: 0.6; font-style: italic;">
+                  🌐 {{ .JSON.String "org" }}
+                </div>
+              </div>
+
+          # ── Tailscale devices
+          - type: custom-api
+            title: Tailscale Devices
+            title-url: https://login.tailscale.com/admin/machines
+            cache: 5m
+            url: https://api.tailscale.com/api/v2/tailnet/-/devices
+            headers:
+              Authorization: Bearer ${TAILSCALE_API_KEY}
+            template: |
+              <style>
+                .ts-row { display: flex; align-items: center; gap: 8px; }
+                .ts-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+                .ts-dot-on { background-color: var(--color-positive); }
+                .ts-dot-off { background-color: var(--color-negative); }
+              </style>
+              <ul class="list list-gap-10 collapsible-container" data-collapse-after="6">
+                {{ range .JSON.Array "devices" }}
+                <li>
+                  <div class="ts-row">
+                    <span class="size-h4 block text-truncate color-primary grow">
+                      {{ findMatch "^([^.]+)" (.String "name") }}
+                    </span>
+                    {{ $lastSeen := .String "lastSeen" | parseTime "rfc3339" }}
+                    {{ if $lastSeen.After (offsetNow "-10s") }}
+                      <span class="ts-dot ts-dot-on" data-popover-type="text" data-popover-text="Online"></span>
+                    {{ else }}
+                      <span class="ts-dot ts-dot-off" data-popover-type="text"
+                        data-popover-text="Offline — last seen {{ ($lastSeen.In now.Location).Format "Jan 2 3:04pm" }}"></span>
+                    {{ end }}
+                  </div>
+                  <ul class="list-horizontal-text">
+                    <li>{{ .String "os" }}</li>
+                    <li>{{ .String "addresses.0" }}</li>
+                  </ul>
+                </li>
+                {{ end }}
+              </ul>
+
+          - type: releases
+            cache: 6h
+            repositories:
+              - glanceapp/glance
+              - jellyfin/jellyfin
+              - LizardByte/Sunshine
+              - AdguardTeam/AdGuardHome
+              - linuxserver/docker-prowlarr
+              - Radarr/Radarr
+              - Sonarr/Sonarr
+              - morpheus65535/bazarr
+              - santiagosayshey/profilarr
+              - seerr-team/seerr
+              - qbittorrent/qBittorrent
+              - immich-app/immich
+              - rommapp/romm
+              - louislam/uptime-kuma
+              - portainer/portainer
+              - containrrr/watchtower

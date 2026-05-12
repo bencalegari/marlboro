@@ -299,92 +299,19 @@ docker compose up -d
 
 ## Part 6: Glance Configuration
 
-Create `~/marlboro/glance/config/glance.yml`:
+The Glance dashboard config lives at `services/glance/config/glance.yml` and is tracked in this repo (the rest of `services/` is gitignored — see `.gitignore` for the exception). Edit the file, commit, push/pull — the live container reads it directly.
 
-```yaml
-server:
-  port: 8080
+Several widgets pull from external APIs and need credentials in 1Password (vault: Private, tag: marlboro-nas):
 
-pages:
-  - name: Home
-    columns:
-      - size: small
-        widgets:
-          - type: server-stats
-          - type: clock
-            hour-format: 12h
-          - type: weather
-            location: Petaluma, California, US
-            units: imperial
-            hour-format: 12h
-      - size: full
-        widgets:
-          - type: docker-containers
-          - type: monitor
-            title: Services
-            sites:
-              - title: Jellyfin
-                url: http://<server-ip>:8096
-                same-tab: true
-              - title: AdGuard Home
-                url: http://adguard:3001
-                same-tab: true
-              - title: Sunshine
-                url: https://<server-ip>:47990
-                allow-insecure: true
-                same-tab: true
-              - title: Prowlarr
-                url: http://prowlarr:9696
-                same-tab: true
-              - title: Radarr
-                url: http://radarr:7878
-                same-tab: true
-              - title: Sonarr
-                url: http://sonarr:8989
-                same-tab: true
-              - title: Bazarr
-                url: http://bazarr:6767
-                same-tab: true
-              - title: Seerr
-                url: http://seerr:5055
-                same-tab: true
-              - title: Profilarr
-                url: http://profilarr:6868
-                same-tab: true
-              - title: qBittorrent
-                url: http://qbittorrent:8080
-                same-tab: true
-              - title: Immich
-                url: http://immich-server:2283
-                same-tab: true
-              - title: RomM
-                url: http://romm:8080
-                same-tab: true
-              - title: Portainer
-                url: http://portainer:9000
-                same-tab: true
-              - title: Nginx Proxy Manager
-                url: http://nginx-proxy-manager:81
-                same-tab: true
-              - title: Scrutiny
-                url: http://scrutiny:8080
-                same-tab: true
-      - size: small
-        widgets:
-          - type: releases
-            cache: 6h
-            repositories:
-              - glanceapp/glance
-              - jellyfin/jellyfin
-              - LizardByte/Sunshine
-              - AdguardTeam/AdGuardHome
-              - Prowlarr/Prowlarr
-              - Radarr/Radarr
-              - Sonarr/Sonarr
-              - immich-app/immich
-              - rommapp/romm
-              - seerr-team/seerr
-```
+| 1Password Item | Field | Where to get it |
+|---|---|---|
+| Marlboro NAS - Sonarr | `api_key` | Sonarr → Settings → General → Security → API Key |
+| Marlboro NAS - Radarr | `api_key` | Radarr → Settings → General → Security → API Key |
+| Marlboro NAS - Tailscale | `api_key` | [tailscale admin → Keys → API access tokens](https://login.tailscale.com/admin/settings/keys) |
+
+`TAILSCALE_HOSTNAME` is auto-populated into `Marlboro NAS - Network` by `setup_script.sh` (pulled from `tailscale status`). `setup_script.sh` writes all four values into `.env`, and `docker-compose.yml` passes them into the Glance container's environment.
+
+If any 1Password item is missing, `setup_script.sh` prints a warning and that widget renders blank until you add the key.
 
 ---
 
