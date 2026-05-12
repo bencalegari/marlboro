@@ -466,6 +466,7 @@ services:
     restart: unless-stopped
     networks:
       - homelab
+      - coolify
     extra_hosts:
       - "host.docker.internal:host-gateway"
     privileged: true
@@ -531,3 +532,6 @@ services:
 networks:
   homelab:
     driver: bridge
+  coolify:
+    external: true
+    name: coolify

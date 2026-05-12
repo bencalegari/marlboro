@@ -1058,16 +1058,19 @@ NPM communicates with Jellyfin via `host.docker.internal` which resolves to the 
 
 Coolify is a self-hosted PaaS for deploying apps and managing servers via Docker. It runs alongside the existing stack with NPM as its reverse proxy. Coolify's built-in Traefik proxy is disabled so it doesn't conflict with NPM on ports 80/443.
 
-### 20.1 Create Directories
+### 20.1 Create Directories and the `coolify` Network
 
 ```bash
 mkdir -p ~/marlboro/services/coolify/{app,postgres,redis,ssh}
 chmod 700 ~/marlboro/services/coolify/ssh
 sudo mkdir -p /data/coolify/source
 sudo chown $USER:$USER /data/coolify/source
+docker network create coolify
 ```
 
 The `/data/coolify/source` path is a fixed host path Coolify hard-codes internally — it must exist outside the repo directory.
+
+The `coolify` Docker network is where every app Coolify deploys lands (Coolify uses it for service discovery between deployed apps). The `coolify` service in `docker-compose.yml` is attached to both `homelab` (so it can talk to the rest of the stack) and `coolify` (so it can manage deployed apps). Without this network, deploys fail with `Error response from daemon: network coolify not found`.
 
 ### 20.2 Run the Setup Script
 
@@ -1168,6 +1171,17 @@ After login, Coolify will prompt you to add a server. Choose **This Machine** (o
 - **Coolify runs privileged.** Required for Docker management. The container has significant host access — expected for a PaaS tool.
 - **Postgres UID mismatch.** `postgres:15-alpine` runs as UID 999. If the DB fails to start with a permissions error, fix with: `sudo chown -R 999:999 ~/marlboro/services/coolify/postgres`
 - **`DISABLE_STANDALONE_MODE` naming.** This env var has changed across Coolify beta releases. If Traefik appears running inside the container, check Coolify's release notes — it may also be `STANDALONE_MODE=false` in some builds.
+- **Server validation requires a matching SSH key.** When you add the "This Machine" server in 20.7, Coolify generates a private key and stores its public key. Copy that public key into `/root/.ssh/authorized_keys` on the host (`echo '<pubkey>' | sudo tee /root/.ssh/authorized_keys && sudo chmod 600 /root/.ssh/authorized_keys`). If the UI doesn't display the public key cleanly, extract it via `docker exec coolify php artisan tinker --execute='echo App\Models\PrivateKey::find(<id>)->getPublicKey();'`.
+- **Watch the `private_key_id` foreign key.** Coolify's UI has occasionally been observed to leave the `servers.private_key_id` column at `0` after generating and assigning a key, producing a misleading "key not valid" error during validation. Confirm with `docker exec coolify-db psql -U coolify -d coolify -c "SELECT id, private_key_id FROM servers;"` and `UPDATE servers SET private_key_id = <real-id> WHERE id = <server-id>;` if it's stale.
+
+### 20.10 Proxying Deployed Apps Through NPM
+
+Apps Coolify deploys land on the `coolify` Docker network, but NPM is on the `homelab` network — they can't see each other by default. Two options when you want to expose a deployed app via `*.marlboro-bc.duckdns.org`:
+
+1. **Attach NPM to the `coolify` network too.** Add `coolify` to NPM's `networks` block in `docker-compose.yml`, recreate NPM, then point the proxy host at the deployed container's name and internal port.
+2. **Have Coolify publish the app on a host port.** In the Coolify UI, set a host port mapping for the app's service. NPM can then proxy to `host.docker.internal:<port>`.
+
+Option 1 is cleaner for many apps; option 2 avoids cross-network coupling at the cost of a reserved host port per app.
 
 ---
 
