@@ -133,6 +133,101 @@ chmod 600 "$ENV_FILE"
 
 log ".env written with $(grep -c '=' "$ENV_FILE") variables"
 
+# ─── Seed qBittorrent WebUI Credentials ──────────────────────────────────────
+# qBittorrent stores its WebUI password as a PBKDF2-HMAC-SHA512 hash inside
+# qBittorrent.conf and accepts no plaintext-password env var. We compute the
+# hash from the 1Password value and write it directly, so the container never
+# needs the temporary-password dance.
+
+QBIT_CONF="$SCRIPT_DIR/services/qbittorrent/config/qBittorrent/qBittorrent.conf"
+QBIT_PW=$(pull_field "Marlboro NAS - qBittorrent" password)
+
+seed_qbit_conf() {
+  python3 - "$QBIT_PW" "$QBIT_CONF" "$1" <<'PY'
+import sys, os, hashlib, base64, re
+
+password, conf_path, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def make_pw_line(pw):
+    salt = os.urandom(16)
+    h = hashlib.pbkdf2_hmac('sha512', pw.encode(), salt, 100000, dklen=64)
+    return ('WebUI\\Password_PBKDF2="@ByteArray('
+            f'{base64.b64encode(salt).decode()}:{base64.b64encode(h).decode()})"')
+
+def verify(pw, line):
+    m = re.search(r'@ByteArray\(([^:]+):([^)]+)\)', line)
+    if not m:
+        return False
+    salt = base64.b64decode(m.group(1))
+    expected = base64.b64decode(m.group(2))
+    return hashlib.pbkdf2_hmac('sha512', pw.encode(), salt, 100000, dklen=64) == expected
+
+try:
+    with open(conf_path) as f:
+        lines = f.read().splitlines()
+except FileNotFoundError:
+    lines = []
+
+pw_idx = next((i for i, l in enumerate(lines) if l.startswith('WebUI\\Password_PBKDF2=')), None)
+user_idx = next((i for i, l in enumerate(lines) if l.startswith('WebUI\\Username=')), None)
+prefs_idx = next((i for i, l in enumerate(lines) if l.strip() == '[Preferences]'), None)
+
+pw_ok = pw_idx is not None and verify(password, lines[pw_idx])
+user_ok = user_idx is not None and lines[user_idx] == 'WebUI\\Username=admin'
+
+if pw_ok and user_ok:
+    print('unchanged')
+    sys.exit(0)
+
+if mode == 'check':
+    print('needs-update')
+    sys.exit(0)
+
+if prefs_idx is None:
+    lines.insert(0, '[Preferences]')
+    prefs_idx = 0
+
+if pw_idx is not None:
+    lines[pw_idx] = make_pw_line(password)
+else:
+    lines.insert(prefs_idx + 1, make_pw_line(password))
+
+if user_idx is not None:
+    lines[user_idx] = 'WebUI\\Username=admin'
+else:
+    lines.insert(prefs_idx + 1, 'WebUI\\Username=admin')
+
+os.makedirs(os.path.dirname(conf_path), exist_ok=True)
+with open(conf_path, 'w') as f:
+    f.write('\n'.join(lines) + '\n')
+print('updated')
+PY
+}
+
+if [ -z "$QBIT_PW" ]; then
+  log "WARNING: qBittorrent password missing in 1Password — skipping conf seed"
+elif ! command -v python3 &>/dev/null; then
+  log "WARNING: python3 not found — skipping qBittorrent conf seed"
+else
+  status=$(seed_qbit_conf check)
+  if [ "$status" = "unchanged" ]; then
+    log "qBittorrent WebUI credentials already match 1Password"
+  else
+    was_running=false
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'qbittorrent'; then
+      was_running=true
+      log "Stopping qbittorrent to update WebUI credentials..."
+      (cd "$SCRIPT_DIR" && docker compose stop qbittorrent >/dev/null)
+    fi
+    seed_qbit_conf apply >/dev/null
+    log "qBittorrent WebUI credentials seeded into qBittorrent.conf"
+    if $was_running; then
+      log "Restarting qbittorrent..."
+      (cd "$SCRIPT_DIR" && docker compose up -d qbittorrent >/dev/null)
+    fi
+  fi
+fi
+
 # ─── Ensure Media Directories & Ownership ────────────────────────────────────
 
 MEDIA_DIRS=(/mnt/tank/media/movies /mnt/tank/media/tv /mnt/tank/downloads/complete /mnt/tank/downloads/incomplete)

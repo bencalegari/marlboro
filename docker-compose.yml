@@ -184,8 +184,6 @@ services:
       - PGID=1000
       - TZ=America/Los_Angeles
       - WEBUI_PORT=8080
-      - QBT_WEBUI__USERNAME=admin
-      - QBT_WEBUI__PASSWORD=${QBIT_PASSWORD}
     volumes:
       - ./services/qbittorrent/config:/config
       - /mnt/tank/downloads:/downloads
