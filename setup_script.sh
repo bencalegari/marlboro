@@ -103,6 +103,13 @@ if ! op item get "Marlboro NAS - Screenscraper" --vault "$VAULT" &>/dev/null; th
   log "WARNING: 'Marlboro NAS - Screenscraper' not found in 1Password — SCREENSCRAPER vars will be blank"
 fi
 
+# Glance widget API keys are created manually after first-run — warn if missing
+for item in "Marlboro NAS - Sonarr" "Marlboro NAS - Radarr" "Marlboro NAS - Tailscale"; do
+  if ! op item get "$item" --vault "$VAULT" &>/dev/null; then
+    log "WARNING: '$item' not found in 1Password — Glance widget will be blank until you add it"
+  fi
+done
+
 # ─── Pull Credentials & Write .env ────────────────────────────────────────────
 
 log "Pulling credentials from 1Password and writing $ENV_FILE..."
@@ -127,6 +134,10 @@ COOLIFY_REDIS_PASSWORD=$(pull_field "Marlboro NAS - Coolify Redis" password)
 COOLIFY_PUSHER_APP_ID=$(pull_field "Marlboro NAS - Coolify Pusher App ID" password)
 COOLIFY_PUSHER_APP_KEY=$(pull_field "Marlboro NAS - Coolify Pusher App Key" password)
 COOLIFY_PUSHER_APP_SECRET=$(pull_field "Marlboro NAS - Coolify Pusher Secret" password)
+SONARR_API_KEY=$(pull_field "Marlboro NAS - Sonarr" api_key)
+RADARR_API_KEY=$(pull_field "Marlboro NAS - Radarr" api_key)
+TAILSCALE_API_KEY=$(pull_field "Marlboro NAS - Tailscale" api_key)
+TAILSCALE_HOSTNAME=$(pull_field "Marlboro NAS - Network" tailscale-hostname)
 EOF
 
 chmod 600 "$ENV_FILE"

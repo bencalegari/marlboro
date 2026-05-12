@@ -391,6 +391,11 @@ services:
     restart: unless-stopped
     networks:
       - homelab
+    environment:
+      - SONARR_API_KEY=${SONARR_API_KEY}
+      - RADARR_API_KEY=${RADARR_API_KEY}
+      - TAILSCALE_API_KEY=${TAILSCALE_API_KEY}
+      - TAILSCALE_HOSTNAME=${TAILSCALE_HOSTNAME}
     volumes:
       - ./services/glance/config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro
