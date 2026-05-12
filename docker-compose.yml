@@ -184,6 +184,7 @@ services:
       - PGID=1000
       - TZ=America/Los_Angeles
       - WEBUI_PORT=8080
+      - DOCKER_MODS=ghcr.io/gabe565/linuxserver-mod-vuetorrent:latest
     volumes:
       - ./services/qbittorrent/config:/config
       - /mnt/tank/downloads:/downloads
