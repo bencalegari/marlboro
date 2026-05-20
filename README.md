@@ -772,6 +772,28 @@ tailscale ssh <your-username>@<tailscale-hostname>
 
 ---
 
+## Part 16.5: Jellyfin Hardware Transcoding & HDR Tone Mapping
+
+The Intel UHD 630 iGPU is already exposed to the container via `/dev/dri` in `docker-compose.yml`. Jellyfin still needs to be told to use it, otherwise HDR/Dolby Vision titles direct-play and fail silently on clients that claim codec support but don't actually handle DV (notably the LG webOS Jellyfin app — audio plays, video is black).
+
+In Jellyfin **Dashboard → Playback → Transcoding**:
+
+- **Hardware acceleration**: `Intel QuickSync (QSV)`
+- **QSV device**: leave blank (auto-detects `/dev/dri/renderD128`)
+- **Enable hardware decoding for**: H264, HEVC, HEVC 10bit, VC1
+- **Enable hardware encoding**: ✅
+- **Allow encoding in HEVC format**: ✅ (UHD 630 does QSV HEVC 10-bit; keeps transcode quality close to source)
+- **Enable Tone mapping**: ✅
+- **Enable VPP Tone mapping**: ✅ (Intel-native, faster than OpenCL)
+
+Then on each client, lower **Home network quality** below the source bitrate (e.g. 20 Mbps) so 4K DV/HDR titles (typically 50–80 Mbps) trigger a server transcode + tone-map instead of direct-playing.
+
+> **Why not commit `encoding.xml`?** Jellyfin rewrites it whenever any dashboard setting changes (subtitles, deinterlacing, etc.), so tracking it creates constant noise diffs. It's gitignored under `services/*`. Re-apply the settings above on a fresh install.
+
+> **Verify transcoding is using the GPU:** during playback, `docker logs jellyfin --tail 50` should show ffmpeg invoked with `-hwaccel qsv` and `vpp_qsv` / `tonemap_vaapi` filters. `intel_gpu_top` on the host (from `intel-gpu-tools`) shows live engine utilization.
+
+---
+
 # Phase 2: When Drives Arrive
 
 ---
