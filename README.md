@@ -785,8 +785,13 @@ In Jellyfin **Dashboard → Playback → Transcoding**:
 - **Allow encoding in HEVC format**: ✅ (UHD 630 does QSV HEVC 10-bit; keeps transcode quality close to source)
 - **Enable Tone mapping**: ✅
 - **Enable VPP Tone mapping**: ✅ (Intel-native, faster than OpenCL)
+- **Tone mapping algorithm**: `mobius` (brighter than the technically-accurate `bt2390` default; preferable for SDR output to an HDR-capable display since the TV can't enter HDR mode for a tone-mapped stream)
+- **VPP Tone-mapping Brightness**: `24` (default `16` is too dim once tone-mapped)
+- **Stereo downmix algorithm**: `NightmodeDialogue` (boosts the center channel into L/R; rescues dialogue when 5.1 collapses to stereo, which happens whenever a TV passes AAC 5.1 over HDMI ARC)
 
 Then on each client, lower **Home network quality** below the source bitrate (e.g. 20 Mbps) so 4K DV/HDR titles (typically 50–80 Mbps) trigger a server transcode + tone-map instead of direct-playing.
+
+> **Surround audio caveat:** the official `jellyfin-webos` client transcodes audio to AAC 5.1, which doesn't pass reliably over HDMI ARC — soundbars often see stereo and rear surrounds go silent. On the LG TV, set **Sound → Sound Out → HDMI ARC → Auto / Pass-through** (not PCM), and on the soundbar, enable any "Dolby/DTS direct" option. If rears are still silent, the only complete fix is a client that supports surround passthrough (Apple TV 4K, Shield TV, or a rooted webOS Homebrew Channel install).
 
 > **Why not commit `encoding.xml`?** Jellyfin rewrites it whenever any dashboard setting changes (subtitles, deinterlacing, etc.), so tracking it creates constant noise diffs. It's gitignored under `services/*`. Re-apply the settings above on a fresh install.
 
