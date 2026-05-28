@@ -88,6 +88,9 @@ ensure_secret   "Marlboro NAS - Coolify Pusher App ID"    "coolify" "$(openssl r
 ensure_secret   "Marlboro NAS - Coolify Pusher App Key"   "coolify" "$(openssl rand -hex 16)"
 ensure_secret   "Marlboro NAS - Coolify Pusher Secret"    "coolify" "$(openssl rand -hex 32)"
 
+# Speedtest Tracker — APP_KEY must be "base64:" + base64(32 bytes) (Laravel format)
+ensure_secret   "Marlboro NAS - Speedtest App Key"        "speedtest" "base64:$(openssl rand -base64 32)"
+
 # DuckDNS token must be created manually — just warn if missing
 if ! op item get "Marlboro NAS - DuckDNS" --vault "$VAULT" &>/dev/null; then
   log "WARNING: 'Marlboro NAS - DuckDNS' not found in 1Password — DUCKDNS_TOKEN will be blank"
@@ -104,7 +107,7 @@ if ! op item get "Marlboro NAS - Screenscraper" --vault "$VAULT" &>/dev/null; th
 fi
 
 # Glance widget API keys are created manually after first-run — warn if missing
-for item in "Marlboro NAS - Sonarr" "Marlboro NAS - Radarr" "Marlboro NAS - Tailscale"; do
+for item in "Marlboro NAS - Sonarr" "Marlboro NAS - Radarr" "Marlboro NAS - Tailscale" "Marlboro NAS - Speedtest Tracker"; do
   if ! op item get "$item" --vault "$VAULT" &>/dev/null; then
     log "WARNING: '$item' not found in 1Password — Glance widget will be blank until you add it"
   fi
@@ -138,6 +141,12 @@ SONARR_API_KEY=$(pull_field "Marlboro NAS - Sonarr" api_key)
 RADARR_API_KEY=$(pull_field "Marlboro NAS - Radarr" api_key)
 TAILSCALE_API_KEY=$(pull_field "Marlboro NAS - Tailscale" api_key)
 TAILSCALE_HOSTNAME=$(pull_field "Marlboro NAS - Network" tailscale-hostname)
+NGINX_PROXY_URL=http://nginx-proxy-manager:81
+NGINX_EMAIL_ID=$(pull_field "Marlboro NAS - Nginx Proxy Manager" username)
+NGINX_PASSWORD=$(pull_field "Marlboro NAS - Nginx Proxy Manager" password)
+SPEEDTEST_URL=http://192.168.0.10:8765
+SPEEDTEST_APP_KEY=$(pull_field "Marlboro NAS - Speedtest App Key" password)
+SPEEDTEST_TRACKER_API_TOKEN=$(pull_field "Marlboro NAS - Speedtest Tracker" api_token)
 EOF
 
 chmod 600 "$ENV_FILE"

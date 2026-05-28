@@ -385,6 +385,26 @@ services:
 
   # ─── Dashboard ────────────────────────────────────────────────────────────
 
+  speedtest-tracker:
+    container_name: speedtest-tracker
+    image: lscr.io/linuxserver/speedtest-tracker:latest
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los_Angeles
+      - APP_KEY=${SPEEDTEST_APP_KEY}
+      - APP_URL=http://192.168.0.10:8765
+      - DB_CONNECTION=sqlite
+      - SPEEDTEST_SCHEDULE=0 */6 * * *
+      - SPEEDTEST_SERVERS=
+    volumes:
+      - ./services/speedtest-tracker/config:/config
+    ports:
+      - "8765:80"
+
   glance:
     container_name: glance
     image: glanceapp/glance
@@ -396,6 +416,11 @@ services:
       - RADARR_API_KEY=${RADARR_API_KEY}
       - TAILSCALE_API_KEY=${TAILSCALE_API_KEY}
       - TAILSCALE_HOSTNAME=${TAILSCALE_HOSTNAME}
+      - NGINX_PROXY_URL=${NGINX_PROXY_URL}
+      - NGINX_EMAIL_ID=${NGINX_EMAIL_ID}
+      - NGINX_PASSWORD=${NGINX_PASSWORD}
+      - SPEEDTEST_URL=${SPEEDTEST_URL}
+      - SPEEDTEST_TRACKER_API_TOKEN=${SPEEDTEST_TRACKER_API_TOKEN}
     volumes:
       - ./services/glance/config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -413,6 +438,7 @@ services:
       - qbittorrent
       - immich-server
       - seerr
+      - speedtest-tracker
 
   # ─── Application Platform ─────────────────────────────────────────────────
 
