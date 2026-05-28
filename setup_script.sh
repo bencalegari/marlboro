@@ -239,6 +239,59 @@ else
   fi
 fi
 
+# ─── Reconcile Sonarr WebUI Credentials ──────────────────────────────────────
+# Sonarr v4 stores login creds in sonarr.db (SQLite) — no env var or config
+# file path. We use the API (X-Api-Key auth, independent of forms login) to
+# PUT new creds from 1Password if they've drifted. Probes a forms login first
+# so we don't trigger a Sonarr restart on every setup run.
+
+SONARR_API_KEY=$(pull_field "Marlboro NAS - Sonarr" api_key)
+SONARR_USER=$(pull_field "Marlboro NAS - Sonarr" username)
+SONARR_PASS=$(pull_field "Marlboro NAS - Sonarr" password)
+SONARR_BASE="http://localhost:8989"
+
+reconcile_sonarr_login() {
+  # 1. API reachable?
+  curl -fsS -m 5 -H "X-Api-Key: $SONARR_API_KEY" \
+    "$SONARR_BASE/api/v3/system/status" >/dev/null 2>&1 || return 2
+
+  # 2. Do current 1Password creds already work via forms login?
+  #    Success → 302 to /, failure → 302 to /login?...loginFailed=true
+  local redirect
+  redirect=$(curl -s -o /dev/null -m 5 -w '%{redirect_url}' \
+    -X POST "$SONARR_BASE/login" \
+    --data-urlencode "username=$SONARR_USER" \
+    --data-urlencode "password=$SONARR_PASS" \
+    --data-urlencode "rememberMe=off")
+  if [[ "$redirect" != *loginFailed* && -n "$redirect" ]]; then
+    return 0
+  fi
+
+  # 3. Drifted — PUT new creds. Must include passwordConfirmation.
+  curl -fsS -H "X-Api-Key: $SONARR_API_KEY" "$SONARR_BASE/api/v3/config/host" \
+    | jq --arg u "$SONARR_USER" --arg p "$SONARR_PASS" \
+        '.username=$u | .password=$p | .passwordConfirmation=$p' \
+    | curl -fsS -X PUT \
+        -H "X-Api-Key: $SONARR_API_KEY" \
+        -H "Content-Type: application/json" \
+        --data-binary @- \
+        "$SONARR_BASE/api/v3/config/host" >/dev/null
+  return 1
+}
+
+if [ -z "$SONARR_API_KEY" ] || [ -z "$SONARR_USER" ] || [ -z "$SONARR_PASS" ]; then
+  log "WARNING: Sonarr api_key/username/password missing in 1Password — skipping login reconcile"
+elif ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'sonarr'; then
+  log "Sonarr not running — skipping login reconcile (will sync on next run)"
+else
+  set +e; reconcile_sonarr_login; rc=$?; set -e
+  case $rc in
+    0) log "Sonarr WebUI credentials already match 1Password" ;;
+    1) log "Sonarr WebUI credentials reconciled from 1Password (Sonarr will restart)" ;;
+    2) log "WARNING: Sonarr API unreachable on :8989 — skipping login reconcile" ;;
+  esac
+fi
+
 # ─── Ensure Media Directories & Ownership ────────────────────────────────────
 
 MEDIA_DIRS=(/mnt/tank/media/movies /mnt/tank/media/tv /mnt/tank/downloads/complete /mnt/tank/downloads/incomplete)
