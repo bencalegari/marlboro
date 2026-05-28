@@ -1229,9 +1229,11 @@ In Seerr: **Settings → General**
 
 Then in Seerr: **Settings → Network**
 - **Enable Proxy Support / Trust Proxy:** ✅ (trust `X-Forwarded-*` headers from NPM so audit logs show real client IPs instead of NPM's container IP)
-- **Enable CSRF Protection:** ✅ (only safe to enable once Application URL is set and HTTPS is in front; toggling this forces all users to re-authenticate)
+- **Enable CSRF Protection:** ❌ **Leave this OFF.** When enabled, Seerr marks its CSRF cookies `Secure`, so browsers only send them over **HTTPS**. That means login works *only* through the HTTPS NPM URL — logging in over plain HTTP via the Tailscale IP (`http://100.102.118.61:5055`) or LAN IP (`http://192.168.0.10:5055`) fails with `invalid csrf token` (a generic login error in the UI). Since we want to reach Seerr from the external URL, Tailscale, **and** the local IP, CSRF must stay disabled (this is also Seerr's own default). Only enable it if you commit to HTTPS-only access on every network.
 
 Save and restart the container if prompted (`docker compose restart seerr`).
+
+> **If you already enabled CSRF and login broke:** set `"csrfProtection": false` under the `network` block in `services/jellyseerr/config/settings.json`, then `docker compose restart seerr`. (Edit it while the container is stopped, or it may be overwritten on shutdown.)
 
 ### 21.4 Test External Access
 
