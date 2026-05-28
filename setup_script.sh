@@ -331,28 +331,49 @@ fi
 
 # ─── Ensure Docker Waits for /mnt/tank ───────────────────────────────────────
 # Docker's data-root is /mnt/tank/docker and every service bind-mounts paths
-# under /mnt/tank. If docker.service starts before the mount, it silently
-# binds onto empty dirs on the root fs, breaking imports with phantom "not
-# enough free space" errors. A RequiresMountsFor drop-in prevents the race.
+# under /mnt/tank. If docker.service starts before the mount, it silently binds
+# onto empty dirs on the root fs: imports break with phantom "not enough free
+# space" errors, and downloads/media land on the root SSD where they're hidden
+# (and keep consuming space) once the tank mounts over them. A RequiresMountsFor
+# drop-in prevents the race — but only after a daemon-reload, so we verify the
+# dependency is actually *loaded*, not merely present on disk.
 
 DOCKER_DROPIN=/etc/systemd/system/docker.service.d/wait-for-tank.conf
 DOCKER_DROPIN_CONTENT='[Unit]
 RequiresMountsFor=/mnt/tank
 '
 
+# True only when docker.service has actually loaded the mount dependency.
+dropin_effective() {
+  systemctl show docker -p RequiresMountsFor 2>/dev/null | grep -q '/mnt/tank'
+}
+
 if ! sudo -n true 2>/dev/null; then
-  log "Skipping docker drop-in install (passwordless sudo unavailable) — run manually:"
-  echo "  sudo mkdir -p $(dirname "$DOCKER_DROPIN")"
-  echo "  printf '%s' '$DOCKER_DROPIN_CONTENT' | sudo tee $DOCKER_DROPIN >/dev/null"
-  echo "  sudo chmod 644 $DOCKER_DROPIN && sudo systemctl daemon-reload"
-elif [ "$(sudo cat "$DOCKER_DROPIN" 2>/dev/null)" = "$DOCKER_DROPIN_CONTENT" ]; then
-  log "Docker wait-for-tank drop-in already present"
+  if dropin_effective; then
+    log "Docker wait-for-tank drop-in active"
+  else
+    log "WARNING: docker is NOT waiting for /mnt/tank (guard missing or inert) — run manually:"
+    echo "  sudo mkdir -p $(dirname "$DOCKER_DROPIN")"
+    echo "  printf '%s' '$DOCKER_DROPIN_CONTENT' | sudo tee $DOCKER_DROPIN >/dev/null"
+    echo "  sudo chmod 644 $DOCKER_DROPIN && sudo systemctl daemon-reload"
+    echo "  systemctl show docker -p RequiresMountsFor   # verify: must list /mnt/tank"
+  fi
 else
-  log "Installing docker.service wait-for-tank drop-in..."
-  sudo mkdir -p "$(dirname "$DOCKER_DROPIN")"
-  printf '%s' "$DOCKER_DROPIN_CONTENT" | sudo tee "$DOCKER_DROPIN" >/dev/null
-  sudo chmod 644 "$DOCKER_DROPIN"
-  sudo systemctl daemon-reload
+  if [ "$(sudo cat "$DOCKER_DROPIN" 2>/dev/null)" != "$DOCKER_DROPIN_CONTENT" ]; then
+    log "Installing docker.service wait-for-tank drop-in..."
+    sudo mkdir -p "$(dirname "$DOCKER_DROPIN")"
+    printf '%s' "$DOCKER_DROPIN_CONTENT" | sudo tee "$DOCKER_DROPIN" >/dev/null
+    sudo chmod 644 "$DOCKER_DROPIN"
+  fi
+  # File is correct on disk — ensure systemd has actually loaded it (a live-placed
+  # drop-in stays inert until daemon-reload, even across weeks of uptime).
+  if dropin_effective; then
+    log "Docker wait-for-tank drop-in active"
+  else
+    log "Loading docker wait-for-tank drop-in (daemon-reload)..."
+    sudo systemctl daemon-reload
+    dropin_effective || log "WARNING: drop-in still not effective after reload — a reboot may be required"
+  fi
 fi
 
 # ─── Store Network Details ─────────────────────────────────────────────────────

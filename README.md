@@ -863,7 +863,7 @@ sudo rm -rf /var/lib/docker
 
 ### 17.7 Make Docker Wait for `/mnt/tank`
 
-Because the data root and every service bind mount live on `/mnt/tank`, Docker must not start before the mount is available. Without this, a boot race can leave containers bound to empty directories on the root filesystem — imports then fail with phantom "not enough free space" errors even though the tank has 29 TB free.
+Because the data root and every service bind mount live on `/mnt/tank`, Docker must not start before the mount is available. Without this, a boot race — or any window where the pool is unmounted while containers run (e.g. the ZFS→btrfs migration) — leaves containers bound to plain directories on the root filesystem. Two failures follow: imports fail with phantom "not enough free space" errors even though the tank has 29 TB free, and qBittorrent/Radarr/Sonarr write downloads and media straight onto the root SSD under `/mnt/tank/...`. When the tank later mounts over those paths the data is hidden but still consumes root-disk blocks, silently filling `/` — and it's invisible to `du`, `ncdu`, and baobab alike (see "Recovering shadowed space" below).
 
 ```bash
 sudo install -D -m 644 /dev/stdin /etc/systemd/system/docker.service.d/wait-for-tank.conf <<'EOF'
@@ -873,7 +873,32 @@ EOF
 sudo systemctl daemon-reload
 ```
 
-`setup_script.sh` installs this drop-in on every run, so a fresh provision or a wiped system will re-apply it automatically.
+> **Creating the file is not enough — it must be loaded.** systemd won't apply the drop-in to a running `docker.service` until `daemon-reload` (or a reboot). A drop-in placed live without a reload sits inert until the next reboot. Always verify it's actually *effective*, not just present on disk:
+>
+> ```bash
+> systemctl show docker -p RequiresMountsFor   # must print RequiresMountsFor=/mnt/tank
+> ```
+>
+> If that line is empty, the guard is inert: run `sudo systemctl daemon-reload`, or reboot.
+
+> **`setup_script.sh` only auto-installs this with passwordless sudo.** On this host sudo requires a password, so the script *skips* the install and prints the manual commands above. They must be run by hand and then confirmed with the `systemctl show` check.
+
+#### Recovering shadowed space
+
+If `df -h /` shows the root disk far fuller than `sudo du -x / | tail -1` can account for, data is likely stranded under the `/mnt/tank` mountpoint on the root SSD. Expose it with a bind mount of `/`, which shows the root filesystem *without* the tank overlay:
+
+```bash
+sudo mkdir -p /tmp/rootcheck && sudo mount --bind / /tmp/rootcheck
+sudo du -shx /tmp/rootcheck/mnt/tank/*     # what's stranded on the SSD
+```
+
+Confirm `stat -c %d /tmp/rootcheck/mnt/tank` equals the device of `/` and differs from the live (btrfs) `/mnt/tank`, then reclaim and clean up:
+
+```bash
+sudo rm -rf /tmp/rootcheck/mnt/tank/{downloads,media,photos}
+sudo chattr +i /tmp/rootcheck/mnt/tank   # optional failsafe: block writes to the bare mountpoint so a failed mount can't refill /
+sudo umount /tmp/rootcheck && sudo rmdir /tmp/rootcheck
+```
 
 ### 17.7 Create Immich Upload Directories
 
