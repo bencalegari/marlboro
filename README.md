@@ -958,7 +958,19 @@ docker compose up -d nginx-proxy-manager
 
 > **Tip:** You can also request a wildcard cert by adding `*.marlboro-bc.duckdns.org` to Domain Names — DNS-01 is the only challenge type Let's Encrypt accepts for wildcards.
 
-### 19.5 Configure Jellyfin's Public URL
+### 19.5 AdGuard DNS Rewrite
+
+In AdGuard Home → **Filters → DNS Rewrites → Add DNS Rewrite**:
+- Domain: `*.marlboro-bc.duckdns.org`
+- Answer: `<server-ip>`
+
+A single wildcard rule covers every subdomain you'll proxy through NPM (Jellyfin, Coolify, Seerr, anything you add later) — one rule instead of one per service.
+
+Without this, LAN devices resolve the domain to your public IP and hairpin through the TP-Link's NAT, which is slower (and on some routers, broken) than going straight to the LAN IP. Particularly worth it for Jellyfin since 4K transcodes are bandwidth-heavy.
+
+> **Caveats:** the wildcard does not match the bare apex (`marlboro-bc.duckdns.org` with no subdomain) — fine, since we only use subdomains. Let's Encrypt DNS-01 validation queries DuckDNS's authoritative nameservers from the public internet, not via AdGuard, so the wildcard doesn't interfere with cert issuance. Containers use `1.1.1.1`/`8.8.8.8` directly (per `/etc/docker/daemon.json`), so the wildcard also doesn't affect inter-container traffic.
+
+### 19.6 Configure Jellyfin's Public URL
 
 In Jellyfin: **Dashboard → Networking**
 
@@ -968,7 +980,7 @@ In Jellyfin: **Dashboard → Networking**
 
 Save and restart Jellyfin if prompted.
 
-### 19.6 Test External Access
+### 19.7 Test External Access
 
 From a device **not on your home network** (e.g. phone with Wi-Fi off):
 
@@ -978,7 +990,7 @@ https://jellyfin.marlboro-bc.duckdns.org
 
 You should see the Jellyfin login page over HTTPS with a valid certificate.
 
-### 19.7 Troubleshooting: "Internal Error" When Requesting a Cert
+### 19.8 Troubleshooting: "Internal Error" When Requesting a Cert
 
 If NPM shows only "Internal Error" after submitting the cert request, check the container logs:
 
@@ -993,7 +1005,7 @@ Common causes:
 - **`unauthorized` from DuckDNS** — `dns_duckdns_token` is wrong or missing. Re-copy from <https://www.duckdns.org> and re-save the cert.
 - **Rate limit hit** — Let's Encrypt limits failed validations to 5/hour and certs to 5/week per registered domain. Wait an hour and retry, ideally after fixing the underlying cause.
 
-### 19.8 (Optional) Lock Down to Jellyfin Only
+### 19.9 (Optional) Lock Down to Jellyfin Only
 
 If you only want to expose Jellyfin and not other services, no additional steps are needed — NPM only proxies hostnames you explicitly configure. Other services remain LAN/Tailscale-only.
 
@@ -1085,7 +1097,9 @@ Open NPM at `http://<server-ip>:81` → **Proxy Hosts → Add Proxy Host**:
 
 ### 20.5 AdGuard DNS Rewrite
 
-In AdGuard Home → **Filters → DNS Rewrites → Add DNS Rewrite**:
+If you set up the wildcard rule in 19.5 (`*.marlboro-bc.duckdns.org` → `<server-ip>`), it already covers this hostname — skip ahead to 20.6.
+
+Otherwise, in AdGuard Home → **Filters → DNS Rewrites → Add DNS Rewrite**:
 - Domain: `coolify.marlboro-bc.duckdns.org`
 - Answer: `<server-ip>`
 
@@ -1136,6 +1150,73 @@ Apps Coolify deploys land on the `coolify` Docker network, but NPM is on the `ho
 2. **Have Coolify publish the app on a host port.** In the Coolify UI, set a host port mapping for the app's service. NPM can then proxy to `host.docker.internal:<port>`.
 
 Option 1 is cleaner for many apps; option 2 avoids cross-network coupling at the cost of a reserved host port per app.
+
+---
+
+## Part 21: Expose Seerr Externally via Nginx Proxy Manager
+
+Same DuckDNS + NPM + Let's Encrypt DNS-01 pattern as Jellyfin (Part 19) and Coolify (Part 20). Port forwarding from Part 19.1 already covers 443/80, so no router changes are needed. After this, Seerr is reachable at `https://seerr.marlboro-bc.duckdns.org`.
+
+### 21.1 Create the Seerr Proxy Host in NPM
+
+Open NPM at `http://<server-ip>:81` → **Proxy Hosts → Add Proxy Host**:
+
+- **Details tab:**
+  - Domain Names: `seerr.marlboro-bc.duckdns.org`
+  - Scheme: `http`
+  - Forward Hostname / IP: `seerr` (resolves via the `homelab` Docker network)
+  - Forward Port: `5055`
+  - Enable: **Cache Assets**
+  - Enable: **Block Common Exploits**
+  - Enable: **Websockets Support** (Seerr uses WS for real-time request status updates)
+- **SSL tab:**
+  - SSL Certificate: **Request a new SSL Certificate**
+  - Provider: Let's Encrypt
+  - Email: your email address
+  - Enable: **Use a DNS Challenge**
+  - DNS Provider: **DuckDNS**
+  - Credentials File Content:
+    ```
+    dns_duckdns_token=<your-duckdns-token>
+    ```
+    Same token as `DUCKDNS_TOKEN` in `.env`. Get it from <https://www.duckdns.org>.
+  - Propagation Seconds: leave blank (default 30s is fine)
+  - Enable: **Force SSL**
+  - Enable: **HTTP/2 Support**
+  - Agree to Terms of Service → Save
+
+> **Why DNS-01:** residential ISPs (e.g. Comcast) block inbound port 80, so HTTP-01 challenges time out. Same approach as 19.4 and 20.4.
+
+### 21.2 AdGuard DNS Rewrite
+
+If you set up the wildcard rule in 19.5 (`*.marlboro-bc.duckdns.org` → `<server-ip>`), it already covers this hostname — skip ahead to 21.3.
+
+Otherwise, in AdGuard Home → **Filters → DNS Rewrites → Add DNS Rewrite**:
+- Domain: `seerr.marlboro-bc.duckdns.org`
+- Answer: `<server-ip>`
+
+Without this, devices on your LAN would resolve the hostname to your public IP and try to hairpin through the router — which often fails or is slower than just hitting the local IP.
+
+### 21.3 Tell Seerr It's Behind a Proxy
+
+In Seerr: **Settings → General**
+- **Application URL:** `https://seerr.marlboro-bc.duckdns.org` (enables password-reset email links and external notifications)
+
+Then in Seerr: **Settings → Network**
+- **Enable Proxy Support / Trust Proxy:** ✅ (trust `X-Forwarded-*` headers from NPM so audit logs show real client IPs instead of NPM's container IP)
+- **Enable CSRF Protection:** ✅ (only safe to enable once Application URL is set and HTTPS is in front; toggling this forces all users to re-authenticate)
+
+Save and restart the container if prompted (`docker compose restart seerr`).
+
+### 21.4 Test External Access
+
+From a device **not on your home network** (phone with Wi-Fi off):
+
+```
+https://seerr.marlboro-bc.duckdns.org
+```
+
+Sign in with Jellyfin — the OAuth-style sign-in flow uses websockets, so if login hangs at "Authenticating…", revisit 21.1 and confirm Websockets Support is enabled on the proxy host.
 
 ---
 
