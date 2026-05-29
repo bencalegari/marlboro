@@ -110,6 +110,8 @@ op item get "Marlboro NAS - Network" --vault Private
 
 **Seerr config lives in `./services/jellyseerr/config`** — the directory was kept from the Jellyseerr migration.
 
+**Wi-Fi needs Apple firmware extracted from macOS.** The BCM4364 (`lanai`) chip stays dark until firmware lands in `/lib/firmware/brcm` — see [Part 1 → 1.8 Enable Wi-Fi](#18-enable-wi-fi-broadcom-firmware). A reusable `~/t2-wifi-bt-firmware.tar` backup skips the macOS re-download.
+
 ---
 
 # Phase 1: No Drives Required
@@ -218,6 +220,52 @@ sudo vim /etc/docker/daemon.json
   "dns": ["1.1.1.1", "8.8.8.8"]
 }
 ```
+
+### 1.8 Enable Wi-Fi (Broadcom firmware)
+
+The BCM4364 Wi-Fi chip (board codename `lanai`) needs proprietary Apple firmware that isn't in `linux-firmware`. Without it, `brcmfmac` loads but no `wlan` interface appears — `nmcli radio` shows `WIFI-HW: missing` and `dmesg` shows `brcmfmac4364b2-pcie...bin failed with error -2`. (Wired works regardless, so this is optional for a headless server.)
+
+**If you kept the backup tar from a prior setup**, that's all you need:
+
+```bash
+sudo tar -xC /lib/firmware/brcm -f ~/t2-wifi-bt-firmware.tar
+sudo modprobe -r brcmfmac && sudo modprobe brcmfmac
+```
+
+**From scratch** (single-boot, no macOS partition): extract the firmware from a macOS recovery image. The `apple-firmware-script` package provides `get-apple-firmware`, but its `get_from_online` path has two bugs on Linux — it runs `losetup -f` without `sudo`, and its `rename_only` subcommand only exists in the macOS branch — so drive it manually:
+
+```bash
+sudo apt install apple-firmware-script dmg2img
+
+# 1. Download a macOS Sonoma recovery image (~750 MB) and convert to a raw img
+mkdir -p ~/fwtmp && cd ~/fwtmp
+curl -sO https://raw.githubusercontent.com/kholia/OSX-KVM/master/fetch-macOS-v2.py
+python3 fetch-macOS-v2.py --shortname sonoma   # --shortname keeps it non-interactive
+dmg2img -s BaseSystem.dmg fw.img
+
+# 2. Loop-mount it (note the sudo on losetup -f that the upstream script omits)
+M=$(mktemp -d); L=$(sudo losetup -fP --show fw.img)
+sudo mount -o ro "$L" "$M" 2>/dev/null || sudo mount -o ro "${L}p1" "$M"
+
+# 3. Extract + rename with the script's embedded python (rename_only is macOS-only, so call it directly)
+sed -n "/python3 - \"\$@\" <<'EOF'/,/^EOF\$/p" /usr/bin/get-apple-firmware | sed '1d;$d' > /tmp/rename_fw.py
+python3 /tmp/rename_fw.py "$M/usr/share/firmware" ~/t2-wifi-bt-firmware.tar
+
+# 4. Install, clean up, reload
+sudo tar -xC /lib/firmware/brcm -f ~/t2-wifi-bt-firmware.tar
+sudo umount "$M"; sudo losetup -d "$L"; cd ~ && rm -rf ~/fwtmp
+sudo modprobe -r brcmfmac && sudo modprobe brcmfmac
+```
+
+Verify and connect:
+
+```bash
+nmcli radio                                      # WIFI-HW should now read "enabled"
+nmcli device wifi list
+nmcli device wifi connect "SSID" password "PASSWORD"
+```
+
+> **Keep `~/t2-wifi-bt-firmware.tar` (12 MB).** Reinstalling later is just step 4 again — no macOS download needed. Firmware in `/lib/firmware/brcm` persists across reboots and kernel updates, so this is a one-time setup. `sudo` here needs a real TTY (it can't prompt over a non-interactive pipe).
 
 ---
 
@@ -1286,7 +1334,7 @@ cd ~/marlboro && ./setup_script.sh && docker compose up -d
 
 t2linux publishes a kernel per Ubuntu codename (`questing` = 25.10, `resolute` = 26.04 LTS). **Confirm the target codename's kernel exists** at <https://github.com/AdityaGarg8/t2-ubuntu-repo/releases> before you start — if it's missing, don't upgrade yet.
 
-**1. Update the current release fully, and note your working kernel:**
+**1. *Before* launching `do-release-upgrade`, update the current release fully and note your working kernel:**
 
 ```bash
 sudo apt update && sudo apt full-upgrade
@@ -1302,39 +1350,61 @@ sudo do-release-upgrade
 - **"Remove obsolete packages?" → No** (or review the list first). With the t2 repo disabled, `linux-t2`, every `*-t2-*` kernel/header, and `apple-t2-audio-config` look orphaned and will be offered for removal — accepting strips your only working kernel.
 - **Final "Restart now?" → No.** Do steps 3–4 *before* rebooting.
 
-**3. Re-enable and re-point the third-party repos.** The upgrader disables them under `/etc/apt/sources.list.d/` — this run left them as `*.disabled`, with the original uncommented lines preserved in `*.migrate` (`ls` the directory to see what yours look like). Re-point the codename-pinned ones (`t2`, `docker`, `tailscale`) to the new codename; `1password` and `github-cli` track a `stable` channel with no codename, so just restore them.
+**3. Re-enable and re-point the third-party repos.** `do-release-upgrade` disables them under `/etc/apt/sources.list.d/`. **Do not rely on the `*.migrate` backups** — they don't reliably survive the upgrade (this run they were cleaned up before the post-reboot steps). Write the repo lines explicitly. The codename-pinned ones (`t2`, `docker`, `tailscale`) move to the new codename; `1password` and `github-cli` track a codename-less `stable` channel.
 
 ```bash
-cd /etc/apt/sources.list.d
-sudo sed 's/questing/resolute/g' t2.list.migrate        | sudo tee t2.list
-sudo sed 's/questing/resolute/g' docker.list.migrate    | sudo tee docker.list
-sudo sed 's/questing/resolute/g' tailscale.list.migrate | sudo tee tailscale.list
-sudo cp 1password.list.migrate 1password.list
-sudo cp github-cli.list.migrate github-cli.list
+# t2 — re-point the existing list in place (flat github.io line + codename-tagged release line):
+sudo sed -i 's#/download/questing#/download/resolute#' /etc/apt/sources.list.d/t2.list
+
+# docker:
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu resolute stable' | sudo tee /etc/apt/sources.list.d/docker.list
+
+# tailscale:
+echo 'deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu resolute main' | sudo tee /etc/apt/sources.list.d/tailscale.list
+
+# 1password (stable, no codename):
+echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/1password-archive-keyring.gpg] https://downloads.1password.com/linux/debian/amd64 stable main' | sudo tee /etc/apt/sources.list.d/1password.list
+
+# github-cli (stable, no codename):
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' | sudo tee /etc/apt/sources.list.d/github-cli.list
+
 sudo apt update
 ```
 
-> If `apt update` 404s on `resolute` for Docker or Tailscale (they sometimes lag a fresh Ubuntu release by days), point those two at the previous LTS codename `noble` until they publish. Once `apt update` is clean, you can delete the `*.disabled` / `*.migrate` leftovers.
+> If `apt update` 404s on `resolute` for Docker or Tailscale (they sometimes lag a fresh Ubuntu release by days), swap `resolute` for the previous LTS codename `noble` in those two lines until they publish. Once `apt update` is clean, delete any `*.disabled` / `*.migrate` leftovers.
 
-**4. Install the new release's T2 kernel and make sure GRUB boots it:**
+**4. Install the new release's T2 kernel — but keep the old one as a fallback:**
 
 ```bash
 sudo apt install linux-t2
-ls /boot/vmlinuz*t2*resolute*     # a resolute-built T2 kernel should now exist
+ls /boot/vmlinuz*t2*              # both the old and new T2 kernels should be present
 sudo update-grub
 ```
 
-`GRUB_DEFAULT=0` boots the highest-versioned menu entry, normally the T2 kernel. If GRUB is instead defaulting to a stock `*-generic` kernel, `sudo apt purge` the generic kernels (keep the `-t2-` one) or set `GRUB_DEFAULT` explicitly, then re-run `update-grub`.
+**Keep the previous codename's T2 kernel installed — do NOT `apt autoremove` it.** The new codename's T2 kernel is not guaranteed to boot this hardware (see the step 5 callout), so the old one is your lifeline.
+
+Then make the GRUB menu visible and pin the default to a *known-good* kernel, so a bad new kernel can't strand you on an unattended reboot. `GRUB_DEFAULT=saved` survives future `update-grub` runs (e.g. `apt upgrade`):
+
+```bash
+sudo sed -i -e 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' -e 's/^GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=menu/' -e 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=10/' /etc/default/grub
+sudo update-grub
+# pin to your known-good kernel — replace 7.0.10-1-t2-questing with `uname -r` from step 1:
+ENT=$(sudo grep -oP "(?<=menuentry ').*?(?=')" /boot/grub/grub.cfg | grep -m1 -- '7.0.10-1-t2-questing'); SUB=$(sudo grep -oP "(?<=submenu ').*?(?=')" /boot/grub/grub.cfg | head -1); if [ -n "$SUB" ] && ! sudo grep -qE "^menuentry .*7.0.10-1-t2-questing" /boot/grub/grub.cfg; then TARGET="$SUB>$ENT"; else TARGET="$ENT"; fi; sudo grub-set-default "$TARGET"; sudo grub-editenv list
+```
+
+> If GRUB defaults to a stock `*-generic` kernel, don't bother purging it — a generic kernel can't drive the T2-bridged NVMe and won't boot here either. Just pin the `-t2-` entry as above.
 
 **5. Reboot and verify the stack:**
 
 ```bash
 sudo reboot
 # after it comes back:
-uname -r                                       # should end in -t2-resolute
+uname -r                                       # ideally ends in -t2-resolute (but see callout)
 vainfo                                         # Jellyfin QSV — /dev/dri/renderD128 present
 systemctl show docker -p RequiresMountsFor     # must still print /mnt/tank (Part 17.7)
 docker compose -f ~/marlboro/docker-compose.yml ps
 ```
+
+> **Observed on this box (Macmini8,1, May 2026): the `7.0.10-1-t2-resolute` kernel hangs at boot.** `apple_bce`'s DMA-IRQ thread (`irq/NN-bce_dma`) oopses inside `bce_vhci_firmware_event_completion` and dies holding a spinlock; the module probe (`apple_bce_probe → bce_vhci_create → bce_create_sq`) then soft-locks forever (`native_queued_spin_lock_slowpath`) and the boot never finishes. **The *same upstream version* `7.0.10-1-t2-questing` boots fine and runs 26.04 LTS userspace without issue** (all containers healthy, QSV + tank intact), so the box deliberately stays on the questing kernel (GRUB pinned to it per step 4) until t2linux ships a kernel newer than `7.0.10-1` to retry. **If `uname -r` shows the old codename after this upgrade, that's a working steady state — not a failed upgrade.** Confirm the signature with `journalctl -b -1 -k | grep -iE 'bce|soft lockup'`. Because it's not headless, you can also just pick the new kernel from the visible GRUB menu to re-test, and power-cycle back to questing if it wedges.
 
 **6. Re-check the Watchtower API pin.** 26.04 ships a newer Docker engine, so the `DOCKER_API_VERSION` pin in `docker-compose.yml` (set for 25.10) likely needs bumping. Match it to `docker version --format '{{.Server.APIVersion}}'` (or drop the override if Watchtower negotiates cleanly), then `docker compose up -d watchtower`.
