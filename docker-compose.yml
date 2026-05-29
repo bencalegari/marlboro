@@ -368,7 +368,7 @@ services:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_SCHEDULE=0 0 4 * * *
       - TZ=America/Los_Angeles
-      - DOCKER_API_VERSION=1.54           # required for Ubuntu 25.10
+      - DOCKER_API_VERSION=1.54           # tracks host engine API; re-check after OS upgrade (see README → Upgrading the Ubuntu Release)
 
   # ─── Uptime Monitoring ────────────────────────────────────────────────────
 

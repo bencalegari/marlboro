@@ -90,7 +90,7 @@ op item get "Marlboro NAS - Network" --vault Private
 
 ### Key Caveats
 
-**Ubuntu 25.10 reaches end-of-life July 2026.** Upgrade to 26.04 LTS in April 2026 with `sudo do-release-upgrade`.
+**Ubuntu 25.10 reaches end-of-life July 2026.** Upgrading to 26.04 LTS on this T2 Mac is *not* a plain `sudo do-release-upgrade` — the upgrader disables the t2linux kernel repo, which can orphan the T2 kernel (it gets offered for removal) or leave the machine booting a stock kernel with no T2 audio/Wi-Fi/Bluetooth. Follow the T2-aware procedure in [Part 18 → Upgrading the Ubuntu Release](#upgrading-the-ubuntu-release-t2-aware).
 
 **Jellyfin uses host networking.** Reference it from other containers via `http://host.docker.internal:8096` or `http://<server-ip>:8096`, not `http://jellyfin:8096`.
 
@@ -102,7 +102,7 @@ op item get "Marlboro NAS - Network" --vault Private
 
 **qBittorrent WebUI requires `WebUI\HostHeaderValidation=false`** and `WebUI\Port=8080` in `qBittorrent.conf`.
 
-**Watchtower requires `DOCKER_API_VERSION=1.54`** on Ubuntu 25.10.
+**Watchtower requires `DOCKER_API_VERSION=1.54`** on Ubuntu 25.10. This pin tracks the host Docker engine's API version, so revisit it after an OS upgrade (26.04 ships a newer engine) — match `docker version --format '{{.Server.APIVersion}}'`.
 
 **Sunshine runs as an AppImage** with Sway as the Wayland compositor. Managed via `systemctl --user`.
 
@@ -1280,8 +1280,61 @@ sudo btrfs subvolume list /mnt/tank
 cd ~/marlboro && ./setup_script.sh && docker compose up -d
 ```
 
-**Upgrade Ubuntu to 26.04 LTS (April 2026):**
+### Upgrading the Ubuntu Release (T2-aware)
+
+> **This is not a plain `do-release-upgrade`.** This is a T2 Mac — the kernel (`linux-t2`) and all Apple hardware support (audio, Wi-Fi, Bluetooth) come from the [t2linux](https://github.com/AdityaGarg8/t2-ubuntu-repo) third-party repo. `do-release-upgrade` **disables every third-party repo** for the duration of the upgrade, so without the steps below the T2 kernel gets flagged as an orphan (offered for removal) and the box can come up on a stock generic kernel with no T2 drivers.
+
+t2linux publishes a kernel per Ubuntu codename (`questing` = 25.10, `resolute` = 26.04 LTS). **Confirm the target codename's kernel exists** at <https://github.com/AdityaGarg8/t2-ubuntu-repo/releases> before you start — if it's missing, don't upgrade yet.
+
+**1. Update the current release fully, and note your working kernel:**
+
+```bash
+sudo apt update && sudo apt full-upgrade
+uname -r        # e.g. 7.0.10-1-t2-questing — your known-good fallback
+```
+
+**2. Run the upgrade — but two prompts matter:**
 
 ```bash
 sudo do-release-upgrade
 ```
+
+- **"Remove obsolete packages?" → No** (or review the list first). With the t2 repo disabled, `linux-t2`, every `*-t2-*` kernel/header, and `apple-t2-audio-config` look orphaned and will be offered for removal — accepting strips your only working kernel.
+- **Final "Restart now?" → No.** Do steps 3–4 *before* rebooting.
+
+**3. Re-enable and re-point the third-party repos.** The upgrader disables them under `/etc/apt/sources.list.d/` — this run left them as `*.disabled`, with the original uncommented lines preserved in `*.migrate` (`ls` the directory to see what yours look like). Re-point the codename-pinned ones (`t2`, `docker`, `tailscale`) to the new codename; `1password` and `github-cli` track a `stable` channel with no codename, so just restore them.
+
+```bash
+cd /etc/apt/sources.list.d
+sudo sed 's/questing/resolute/g' t2.list.migrate        | sudo tee t2.list
+sudo sed 's/questing/resolute/g' docker.list.migrate    | sudo tee docker.list
+sudo sed 's/questing/resolute/g' tailscale.list.migrate | sudo tee tailscale.list
+sudo cp 1password.list.migrate 1password.list
+sudo cp github-cli.list.migrate github-cli.list
+sudo apt update
+```
+
+> If `apt update` 404s on `resolute` for Docker or Tailscale (they sometimes lag a fresh Ubuntu release by days), point those two at the previous LTS codename `noble` until they publish. Once `apt update` is clean, you can delete the `*.disabled` / `*.migrate` leftovers.
+
+**4. Install the new release's T2 kernel and make sure GRUB boots it:**
+
+```bash
+sudo apt install linux-t2
+ls /boot/vmlinuz*t2*resolute*     # a resolute-built T2 kernel should now exist
+sudo update-grub
+```
+
+`GRUB_DEFAULT=0` boots the highest-versioned menu entry, normally the T2 kernel. If GRUB is instead defaulting to a stock `*-generic` kernel, `sudo apt purge` the generic kernels (keep the `-t2-` one) or set `GRUB_DEFAULT` explicitly, then re-run `update-grub`.
+
+**5. Reboot and verify the stack:**
+
+```bash
+sudo reboot
+# after it comes back:
+uname -r                                       # should end in -t2-resolute
+vainfo                                         # Jellyfin QSV — /dev/dri/renderD128 present
+systemctl show docker -p RequiresMountsFor     # must still print /mnt/tank (Part 17.7)
+docker compose -f ~/marlboro/docker-compose.yml ps
+```
+
+**6. Re-check the Watchtower API pin.** 26.04 ships a newer Docker engine, so the `DOCKER_API_VERSION` pin in `docker-compose.yml` (set for 25.10) likely needs bumping. Match it to `docker version --format '{{.Server.APIVersion}}'` (or drop the override if Watchtower negotiates cleanly), then `docker compose up -d watchtower`.
