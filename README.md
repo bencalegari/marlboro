@@ -106,7 +106,13 @@ op item get "Marlboro NAS - Network" --vault Private
 
 **Sunshine runs as an AppImage** with Sway as the Wayland compositor. Managed via `systemctl --user`.
 
-**Scrutiny monitors all 4 drives** (`/dev/sda`–`/dev/sdd`) via device passthrough.
+**Scrutiny monitors all 4 drives** (`/dev/sda`–`/dev/sdd`) via device passthrough. Its **Status Threshold is set to "Smart" (not "Both")** — Scrutiny's observed-failure-rate heuristic produces false positives on these Seagate ST8000DM004 drives (e.g. it fails `Spin_Up_Time` for an "observed failure rate >10%" even though the attribute's raw value is 0 and the drive's own SMART self-assessment passes). Smart-only makes the dashboard badge follow the drive's actual SMART verdict. This setting lives in the app-managed `scrutiny.db` (not tracked in git), so **re-apply it after a fresh setup** via Settings → "Metric Status Threshold" → *Smart*, or the API:
+
+```bash
+# status_threshold: 1=Smart, 2=Scrutiny, 3=Both — dashboard renders device_status & threshold
+curl -s -X POST http://localhost:8085/api/settings -H "Content-Type: application/json" \
+  -d '{"theme":"system","layout":"material","dashboard_display":"name","dashboard_sort":"status","temperature_unit":"celsius","file_size_si_units":false,"line_stroke":"smooth","powered_on_hours_unit":"humanize","collector":{"discard_sct_temp_history":false},"metrics":{"notify_level":2,"status_filter_attributes":0,"status_threshold":1,"repeat_notifications":true}}'
+```
 
 **Seerr config lives in `./services/jellyseerr/config`** — the directory was kept from the Jellyseerr migration.
 
@@ -1314,6 +1320,21 @@ sudo btrfs filesystem df /mnt/tank
 ```
 
 **Drive health:** `http://<server-ip>:8085` (Scrutiny)
+
+**Scheduled SMART self-tests:** long (extended) self-tests run monthly via `/etc/cron.d/smart-selftest`, one drive per month staggered across the 8th/12th/16th/20th at 03:00 — full coverage monthly, never two at once, and clear of the 1st-of-month btrfs scrub. Each long test takes ~16h on these ST8000DM004 drives and runs in the background on the drive (auto-pausing during real I/O); Scrutiny ingests the results on its next collector run. `smartctl` is invoked inside the Scrutiny container (it isn't installed on the host). To (re)install the cron file:
+
+```bash
+sudo tee /etc/cron.d/smart-selftest > /dev/null <<'EOF'
+# SMART long (extended) self-tests — one drive/month, staggered, clear of the 1st-of-month btrfs scrub
+0 3 8  * * root /usr/bin/docker exec scrutiny /usr/sbin/smartctl -t long /dev/sda
+0 3 12 * * root /usr/bin/docker exec scrutiny /usr/sbin/smartctl -t long /dev/sdb
+0 3 16 * * root /usr/bin/docker exec scrutiny /usr/sbin/smartctl -t long /dev/sdc
+0 3 20 * * root /usr/bin/docker exec scrutiny /usr/sbin/smartctl -t long /dev/sdd
+EOF
+sudo chmod 644 /etc/cron.d/smart-selftest
+```
+
+Check progress/results anytime: `docker exec scrutiny smartctl -l selftest /dev/sdX`
 
 **btrfs snapshots:**
 
