@@ -25,6 +25,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.1
 - **Watchtower** — Automatic container updates
 - **Uptime Kuma** — Uptime monitoring
 - **Glance** — Homelab dashboard
+- **Forgejo** — Self-hosted Git forge
 - **DuckDNS** — Dynamic DNS for external access
 
 ---
@@ -56,6 +57,8 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.1
 | Nginx Proxy Manager (https) | 443 | |
 | Scrutiny | 8085 | Internal container port is 8080 |
 | Uptime Kuma | 3002 | Internal container port is 3001 |
+| Forgejo (web) | 3003 | Internal container port is 3000 |
+| Forgejo (git SSH) | 2222 | Maps to container 22; host 22 is the OS sshd |
 | DuckDNS | — | No ports, DDNS updater only |
 | Sunshine web UI | 47990 HTTPS | Runs on host, not Docker |
 | Sunshine streaming | 47984, 47989 TCP | Moonlight ports |
@@ -1298,6 +1301,149 @@ https://seerr.marlboro-bc.duckdns.org
 ```
 
 Sign in with Jellyfin — the OAuth-style sign-in flow uses websockets, so if login hangs at "Authenticating…", revisit 21.1 and confirm Websockets Support is enabled on the proxy host.
+
+---
+
+## Part 22: Forgejo
+
+Forgejo is a self-hosted, lightweight Git forge (a Gitea fork). It runs on the `homelab` network with NPM as its reverse proxy, uses SQLite (no extra DB container), and exposes git over SSH on host port `2222` since the OS sshd owns port 22.
+
+### 22.1 Run the Setup Script
+
+```bash
+cd ~/marlboro
+./setup_script.sh
+```
+
+The script generates the admin login in 1Password (vault: Private, tag: marlboro-nas):
+
+| 1Password Item | Used For |
+|---|---|
+| Marlboro NAS - Forgejo | Admin account created in 22.3 (`username` + `password`) |
+
+Forgejo itself needs no `.env` variables — it generates its own `SECRET_KEY`/`INTERNAL_TOKEN` into `services/forgejo/data/gitea/conf/app.ini` on first run. The admin password isn't consumed by the container; it lives in 1Password so the CLI step below can pull it.
+
+### 22.2 Start Forgejo
+
+```bash
+docker compose up -d forgejo
+docker compose logs -f forgejo
+# Wait for "Starting new server: tcp:0.0.0.0:3000" — the bind-mounted
+# services/forgejo/data is created and chowned to UID 1000 automatically.
+```
+
+`FORGEJO__security__INSTALL_LOCK=true` skips the web installer, so Forgejo boots straight into the app with SQLite. Registration is disabled (`DISABLE_REGISTRATION=true`), so there's no open sign-up window to race — you create the admin via CLI next.
+
+### 22.3 Create the Admin Account
+
+Forgejo runs as the `git` user inside the container. Create the first admin from the credentials in 1Password:
+
+```bash
+docker exec -u git forgejo forgejo admin user create \
+  --admin \
+  --username "$(op item get 'Marlboro NAS - Forgejo' --vault Private --fields username --reveal)" \
+  --email bencalegari@navapbc.com \
+  --password "$(op item get 'Marlboro NAS - Forgejo' --vault Private --fields password --reveal)" \
+  --must-change-password=false
+```
+
+Then log in at `http://<server-ip>:3003` to confirm before wiring up the proxy.
+
+### 22.4 Configure NPM Proxy Host
+
+Open NPM at `http://<server-ip>:81` → **Proxy Hosts → Add Proxy Host**:
+
+- **Details tab:**
+  - Domain Names: `git.marlboro-bc.duckdns.org`
+  - Scheme: `http`
+  - Forward Hostname / IP: `forgejo` (resolves via the `homelab` Docker network)
+  - Forward Port: `3000` (the internal container port, not the `3003` host mapping)
+  - Enable: **Block Common Exploits**
+  - Enable: **Websockets Support**
+- **SSL tab:**
+  - SSL Certificate: **Request a new SSL Certificate**
+  - Provider: Let's Encrypt
+  - Email: your email address
+  - Enable: **Use a DNS Challenge**
+  - DNS Provider: **DuckDNS**
+  - Credentials File Content:
+    ```
+    dns_duckdns_token=<your-duckdns-token>
+    ```
+    Same token as `DUCKDNS_TOKEN` in `.env`. Get it from <https://www.duckdns.org>.
+  - Propagation Seconds: leave blank (default 30s is fine)
+  - Enable: **Force SSL**
+  - Enable: **HTTP/2 Support**
+  - Agree to Terms of Service → Save
+
+> **Heads up — `413 Request Entity Too Large` on push.** NPM caps request bodies at 1 MB by default, which breaks pushing larger objects over HTTPS. In the proxy host's **Advanced** tab add `client_max_body_size 0;` (0 = unlimited), or push over SSH instead (22.6). Same DNS-01 reasoning as 19.4/20.4 — residential ISPs block inbound 80.
+
+### 22.5 AdGuard DNS Rewrite
+
+If you set up the wildcard rule in 19.5 (`*.marlboro-bc.duckdns.org` → `<server-ip>`), it already covers this hostname — skip ahead to 22.6.
+
+Otherwise, in AdGuard Home → **Filters → DNS Rewrites → Add DNS Rewrite**:
+- Domain: `git.marlboro-bc.duckdns.org`
+- Answer: `<server-ip>`
+
+### 22.6 Git Over SSH
+
+The compose file maps host `2222` → container `22` and sets `SSH_PORT=2222`, so Forgejo prints clone URLs with the right port:
+
+```
+git clone ssh://git@git.marlboro-bc.duckdns.org:2222/<owner>/<repo>.git
+```
+
+Add your public key in Forgejo under **Settings → SSH / GPG Keys**. Port `2222` is reachable on the LAN and over Tailscale without any router change; only forward it on the router if you need SSH git from the public internet (HTTPS already works externally via NPM).
+
+### 22.7 Ports Used
+
+| Port | Purpose |
+|------|---------|
+| 3003 | Web UI (host mapping for container port 3000; also proxied via NPM) |
+| 2222 | Git over SSH (container port 22) |
+
+### 22.8 Caveats
+
+- **SQLite, not Postgres.** Fine for a single-user/small-team forge and Forgejo's own recommendation at this scale. To migrate to Postgres later you'd add a `forgejo-db` container, set `FORGEJO__database__*` env vars, and run `forgejo dump` → restore — not a drop-in swap once data exists.
+- **Pinned to major tag `:11`.** Avoids a surprise major upgrade (which runs DB migrations) from Watchtower. Bump the tag deliberately and read the Forgejo release notes when moving to a new major.
+- **`app.ini` is app-managed.** It lives under the gitignored `services/forgejo/data` and holds the generated `SECRET_KEY`/`INTERNAL_TOKEN` — back it up with the data dir; it is **not** in git. A fresh `data` dir means a fresh forge.
+- **Changing the public URL.** `DOMAIN`/`ROOT_URL`/`SSH_*` are seeded from env on first run but then persisted in `app.ini`; editing the env later may not take effect until you also update `app.ini` (or start from a clean `data` dir).
+
+### 22.9 External Access — Push for Off-Tailscale Collaborators
+
+Collaborators who aren't on the Tailscale VPN push over **HTTPS with a personal access token**. This rides the existing setup — no new router change and no new exposed port:
+
+- Port `443` is already forwarded to the server (Part 19.1), and DuckDNS already resolves `git.marlboro-bc.duckdns.org` publicly. The NPM proxy host from 22.4 terminates TLS and forwards to `forgejo:3000`.
+- **Confirm the push-size fix is in place:** the proxy host's Advanced tab must contain `client_max_body_size 0;` (22.4), or pushes larger than 1 MB fail with `413`.
+- Git over SSH (port `2222`) stays **LAN/Tailscale-only by design** — it is *not* used for this and is not exposed to the internet.
+
+**1. Create an account for each collaborator.** Registration is disabled (`DISABLE_REGISTRATION=true`), so the admin provisions users. Either **Site Administration → Identities → Users → Create User** in the UI, or via CLI:
+
+```bash
+docker exec -u git forgejo forgejo admin user create \
+  --username alice \
+  --email alice@example.com \
+  --random-password
+# prints a one-time password — share it securely; Forgejo forces a reset at first login
+```
+
+**2. Grant repo access.** On the repo: **Settings → Collaborators & Teams → add the user** (or add them to an org team). Give `Write` for push access.
+
+**3. The collaborator creates a token.** In their account: **Settings → Applications → Generate New Token**, with the `write:repository` scope (read+write to repos). Forgejo shows the token once — copy it immediately.
+
+**4. They clone and push over HTTPS:**
+
+```bash
+git clone https://git.marlboro-bc.duckdns.org/<owner>/<repo>.git
+# On push, Git prompts for credentials:
+#   Username: their Forgejo username
+#   Password: the access token (NOT their account password)
+```
+
+To avoid retyping, they can cache it with `git config --global credential.helper store` (or their OS keychain helper).
+
+**Revoking access:** delete the token (their **Settings → Applications**), remove them as a collaborator, or deactivate the whole account in **Site Administration → Users**. Per-token revocation is the least disruptive.
 
 ---
 

@@ -547,6 +547,36 @@ services:
       coolify-realtime:
         condition: service_started
 
+  # ─── Git Forge ────────────────────────────────────────────────────────────
+
+  forgejo:
+    container_name: forgejo
+    image: codeberg.org/forgejo/forgejo:11
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - TZ=America/Los_Angeles
+      # Skip the web installer and start straight into the app. SQLite (the
+      # default DB_TYPE) lives at /data/gitea/gitea.db; SECRET_KEY/INTERNAL_TOKEN
+      # are auto-generated into app.ini on first run.
+      - FORGEJO__security__INSTALL_LOCK=true
+      # Public URL (behind NPM) and the host shown in SSH clone URLs.
+      - FORGEJO__server__DOMAIN=git.marlboro-bc.duckdns.org
+      - FORGEJO__server__ROOT_URL=https://git.marlboro-bc.duckdns.org/
+      - FORGEJO__server__SSH_DOMAIN=git.marlboro-bc.duckdns.org
+      - FORGEJO__server__SSH_PORT=2222          # matches the 2222:22 host mapping below
+      # No open sign-ups; the admin is created via CLI (see README Part 22).
+      - FORGEJO__service__DISABLE_REGISTRATION=true
+    volumes:
+      - ./services/forgejo/data:/data
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "3003:3000"   # web UI (internal container port is 3000)
+      - "2222:22"     # git over SSH (host 22 is the OS sshd)
+
   # ─── Dynamic DNS ──────────────────────────────────────────────────────────
 
   duckdns:

@@ -91,6 +91,11 @@ ensure_secret   "Marlboro NAS - Coolify Pusher Secret"    "coolify" "$(openssl r
 # Speedtest Tracker — APP_KEY must be "base64:" + base64(32 bytes) (Laravel format)
 ensure_secret   "Marlboro NAS - Speedtest App Key"        "speedtest" "base64:$(openssl rand -base64 32)"
 
+# Forgejo — admin account, created via CLI after first start (see README Part 22).
+# Not consumed by the container (Forgejo generates its own SECRET_KEY on first
+# run); lives in 1Password so the admin-create command can pull it.
+ensure_password "Marlboro NAS - Forgejo"                  "ben"
+
 # DuckDNS token must be created manually — just warn if missing
 if ! op item get "Marlboro NAS - DuckDNS" --vault "$VAULT" &>/dev/null; then
   log "WARNING: 'Marlboro NAS - DuckDNS' not found in 1Password — DUCKDNS_TOKEN will be blank"
