@@ -605,6 +605,8 @@ services:
       - FORGEJO__server__ROOT_URL=https://git.marlboro-bc.duckdns.org/
       - FORGEJO__server__SSH_DOMAIN=git.marlboro-bc.duckdns.org
       - FORGEJO__server__SSH_PORT=2222          # matches the 2222:22 host mapping below
+      # Git LFS: large-file storage under /data/git/lfs (inside the data volume).
+      - FORGEJO__server__LFS_START_SERVER=true
       # No open sign-ups; the admin is created via CLI (see README Part 22).
       - FORGEJO__service__DISABLE_REGISTRATION=true
     volumes:
