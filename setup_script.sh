@@ -127,6 +127,8 @@ cat > "$ENV_FILE" <<EOF
 # Credentials are stored in 1Password under tag: $TAG
 
 IMMICH_DB_PASSWORD=$(pull_field "Marlboro NAS - Immich DB" password)
+# Consumed by both qBittorrent (seeded into qBittorrent.conf below) and Flood
+# (FLOOD_OPTION_qbpass), which connects to qBittorrent's Web API with auth=none.
 QBIT_PASSWORD=$(pull_field "Marlboro NAS - qBittorrent" password)
 ROMM_ROOT_PASSWORD=$(pull_field "Marlboro NAS - RomM DB Root" password)
 ROMM_DB_PASSWORD=$(pull_field "Marlboro NAS - RomM DB" password)
@@ -162,7 +164,8 @@ log ".env written with $(grep -c '=' "$ENV_FILE") variables"
 # qBittorrent stores its WebUI password as a PBKDF2-HMAC-SHA512 hash inside
 # qBittorrent.conf and accepts no plaintext-password env var. We compute the
 # hash from the 1Password value and write it directly, so the container never
-# needs the temporary-password dance.
+# needs the temporary-password dance. Flood logs in with this same plaintext
+# value (via FLOOD_OPTION_qbpass in .env), so the two are kept in sync here.
 
 QBIT_CONF="$SCRIPT_DIR/services/qbittorrent/config/qBittorrent/qBittorrent.conf"
 QBIT_PW=$(pull_field "Marlboro NAS - qBittorrent" password)

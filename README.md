@@ -16,7 +16,8 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.1
 - **Profilarr** — Quality profile sync from Dictionarry
 - **Seerr** — Media request UI for Jellyfin users
 - **Flaresolverr** — Cloudflare bypass proxy for Prowlarr indexers
-- **qBittorrent** — Torrent client
+- **qBittorrent** — Torrent client (BitTorrent engine)
+- **Flood** — Web UI for qBittorrent
 - **Immich** — Self-hosted photo/video library with mobile backup
 - **RomM** — ROM manager and in-browser emulator
 - **Portainer** — Docker management UI
@@ -48,7 +49,8 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.1
 | Seerr | 5055 | Formerly Jellyseerr |
 | Profilarr | 6868 | |
 | Flaresolverr | 8191 | Internal proxy only |
-| qBittorrent | 8181 | Internal container port is 8080 |
+| qBittorrent | 8181 | Built-in WebUI; internal container port is 8080 |
+| Flood | 3004 | Main torrent UI (front-end for qBittorrent); internal container port is 3000 |
 | Immich | 2283 | |
 | RomM | 7070 | |
 | Portainer | 9000 | |
@@ -103,7 +105,9 @@ op item get "Marlboro NAS - Network" --vault Private
 
 **AdGuard conflicts with systemd-resolved.** Fixed via `/etc/systemd/resolved.conf.d/adguard.conf` with `DNSStubListener=no`.
 
-**qBittorrent WebUI requires `WebUI\HostHeaderValidation=false`** and `WebUI\Port=8080` in `qBittorrent.conf`.
+**qBittorrent WebUI requires `WebUI\HostHeaderValidation=false`** and `WebUI\Port=8080` in `qBittorrent.conf`. Disabling host-header validation is also what lets the Flood container reach the Web API as `qbittorrent:8080`.
+
+**Flood is a separate container, not a qBittorrent WebUI mod.** It replaces the old VueTorrent `DOCKER_MODS` entry. Flood runs with `--auth none` (no Flood-level login — the stack is gated at the network layer) and connects to qBittorrent via `FLOOD_OPTION_qburl=http://qbittorrent:8080`, seeded with `QBIT_PASSWORD` (the same value `setup_script.sh` writes into `qBittorrent.conf`). qBittorrent's own WebUI still works at `:8181`. To require a login on Flood instead, set `FLOOD_OPTION_auth=default`, drop the `qburl`/`qbuser`/`qbpass` vars, and configure the connection in Flood's first-run wizard.
 
 **Watchtower requires `DOCKER_API_VERSION=1.54`** on Ubuntu 25.10. This pin tracks the host Docker engine's API version, so revisit it after an OS upgrade (26.04 ships a newer engine) — match `docker version --format '{{.Server.APIVersion}}'`.
 
@@ -332,6 +336,7 @@ mkdir -p ~/marlboro/services/romm/{db,resources,assets,config}
 mkdir -p ~/marlboro/services/nginx-proxy-manager/letsencrypt
 mkdir -p ~/marlboro/services/scrutiny/{config,influxdb}
 mkdir -p ~/marlboro/services/glance/config
+mkdir -p ~/marlboro/services/flood/data   # Flood runs as 1000:1000; this dir must be owned by your user
 ```
 
 ---
@@ -595,22 +600,33 @@ Downloads: **Tools → Options → Downloads**
 - Default Save Path: `/downloads/complete`
 - Incomplete: `/downloads/incomplete`
 
-**Install VueTorrent (alternative WebUI):**
+> `setup_script.sh` already seeds the WebUI username/password into `qBittorrent.conf`
+> from 1Password, so the temp-password/permanent-password dance above is only
+> needed if you change the password manually. If you do, run `op item edit
+> "Marlboro NAS - qBittorrent" password=...`, re-run `setup_script.sh` to reseed
+> the conf, then `docker compose up -d --force-recreate flood` so Flood picks up
+> the new value from `.env`.
+
+**Flood (torrent web UI):**
+
+Flood replaces the old VueTorrent alternative-WebUI mod. It runs as its own
+container and reaches qBittorrent over the Web API — there's nothing to install
+into qBittorrent and no manual wiring:
+
+- Browse to `http://<server-ip>:3004`. With `FLOOD_OPTION_auth=none` there's no
+  Flood login; it connects to qBittorrent automatically using `QBIT_PASSWORD`
+  from `.env`, so you should see qBittorrent's torrents immediately.
+- qBittorrent's built-in WebUI stays available at `http://<server-ip>:8181`.
+
+If you previously enabled VueTorrent, remove its lines from `qBittorrent.conf`
+so the built-in WebUI loads again, then recreate the container:
 
 ```bash
-curl -sL https://github.com/VueTorrent/VueTorrent/releases/latest/download/vuetorrent.zip \
-  -o /tmp/vuetorrent.zip
-unzip -o /tmp/vuetorrent.zip -d ~/marlboro/services/qbittorrent/config/
+docker compose stop qbittorrent
+sed -i '/^WebUI\\AlternativeUIEnabled=/d; /^WebUI\\RootFolder=/d' \
+  ~/marlboro/services/qbittorrent/config/qBittorrent/qBittorrent.conf
+docker compose up -d qbittorrent flood
 ```
-
-Then stop qBittorrent, add these lines under `[Preferences]` in `qBittorrent.conf`, and start it:
-
-```ini
-WebUI\AlternativeUIEnabled=true
-WebUI\RootFolder=/config/vuetorrent
-```
-
-To update VueTorrent later, re-run the `curl`/`unzip` commands and restart qBittorrent.
 
 ### 10.2 Flaresolverr → Prowlarr
 
@@ -814,18 +830,19 @@ tailscale ssh <your-username>@<tailscale-hostname>
 
 1. **AdGuard** — DNS first
 2. **qBittorrent** — change default password
-3. **Flaresolverr** — register in Prowlarr, add `flare` tag
-4. **Prowlarr** — add indexers, connect to Radarr/Sonarr
-5. **Radarr/Sonarr** — root folders, connect to qBittorrent and Jellyfin
-6. **Bazarr** — connect to Radarr/Sonarr, add subtitle providers
-7. **Profilarr** — link Dictionarry, connect instances, sync
-8. **Jellyfin** — create Libraries (Movies → `/media/movies`, TV → `/media/tv`)
-9. **Seerr** — connect to Jellyfin, Radarr, Sonarr
-10. **Immich** — admin account, enable mobile backup
-11. **RomM** — admin account, add metadata API keys
-12. **Portainer** — set admin password
-13. **Sunshine** — pair first Moonlight client
-14. **Glance** — verify all services green
+3. **Flood** — browse to `:3004`, confirm it shows qBittorrent's torrents
+4. **Flaresolverr** — register in Prowlarr, add `flare` tag
+5. **Prowlarr** — add indexers, connect to Radarr/Sonarr
+6. **Radarr/Sonarr** — root folders, connect to qBittorrent and Jellyfin
+7. **Bazarr** — connect to Radarr/Sonarr, add subtitle providers
+8. **Profilarr** — link Dictionarry, connect instances, sync
+9. **Jellyfin** — create Libraries (Movies → `/media/movies`, TV → `/media/tv`)
+10. **Seerr** — connect to Jellyfin, Radarr, Sonarr
+11. **Immich** — admin account, enable mobile backup
+12. **RomM** — admin account, add metadata API keys
+13. **Portainer** — set admin password
+14. **Sunshine** — pair first Moonlight client
+15. **Glance** — verify all services green
 
 ---
 
@@ -1396,21 +1413,36 @@ git clone ssh://git@git.marlboro-bc.duckdns.org:2222/<owner>/<repo>.git
 
 Add your public key in Forgejo under **Settings → SSH / GPG Keys**. Port `2222` is reachable on the LAN and over Tailscale without any router change; only forward it on the router if you need SSH git from the public internet (HTTPS already works externally via NPM).
 
-### 22.7 Ports Used
+### 22.7 Git LFS (Large File Storage)
+
+LFS is enabled server-wide via `FORGEJO__server__LFS_START_SERVER=true` in the compose file. Objects are stored on disk under `/data/git/lfs` (the `[lfs]` `PATH` in `app.ini`), which sits inside the `./services/forgejo/data` volume — so LFS data is persisted and backed up alongside everything else. Forgejo auto-generates an `LFS_JWT_SECRET` into `app.ini` on first start after the flag is set; like `SECRET_KEY`, it is app-managed and not in git.
+
+There's nothing to toggle per-repo — once the server flag is on, any repo can use LFS. On the client:
+
+```bash
+git lfs install                      # one-time, installs the git hooks
+git lfs track "*.psd" "*.fbx"        # writes patterns to .gitattributes
+git add .gitattributes
+git add big-file.psd && git commit -m "Add asset" && git push
+```
+
+LFS transfers ride the same HTTPS endpoint as normal git, so the `client_max_body_size 0;` fix from 22.4 is what keeps large LFS uploads from failing with `413`. (Pushing over SSH on `2222` still negotiates LFS transfers over HTTPS via `ROOT_URL`.)
+
+### 22.8 Ports Used
 
 | Port | Purpose |
 |------|---------|
 | 3003 | Web UI (host mapping for container port 3000; also proxied via NPM) |
 | 2222 | Git over SSH (container port 22) |
 
-### 22.8 Caveats
+### 22.9 Caveats
 
 - **SQLite, not Postgres.** Fine for a single-user/small-team forge and Forgejo's own recommendation at this scale. To migrate to Postgres later you'd add a `forgejo-db` container, set `FORGEJO__database__*` env vars, and run `forgejo dump` → restore — not a drop-in swap once data exists.
 - **Pinned to major tag `:11`.** Avoids a surprise major upgrade (which runs DB migrations) from Watchtower. Bump the tag deliberately and read the Forgejo release notes when moving to a new major.
 - **`app.ini` is app-managed.** It lives under the gitignored `services/forgejo/data` and holds the generated `SECRET_KEY`/`INTERNAL_TOKEN` — back it up with the data dir; it is **not** in git. A fresh `data` dir means a fresh forge.
 - **Changing the public URL.** `DOMAIN`/`ROOT_URL`/`SSH_*` are seeded from env on first run but then persisted in `app.ini`; editing the env later may not take effect until you also update `app.ini` (or start from a clean `data` dir).
 
-### 22.9 External Access — Push for Off-Tailscale Collaborators
+### 22.10 External Access — Push for Off-Tailscale Collaborators
 
 Collaborators who aren't on the Tailscale VPN push over **HTTPS with a personal access token**. This rides the existing setup — no new router change and no new exposed port:
 

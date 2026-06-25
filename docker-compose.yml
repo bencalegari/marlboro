@@ -172,6 +172,8 @@ services:
       retries: 3
 
   # ─── Torrent Client ───────────────────────────────────────────────────────
+  # BitTorrent engine. Its built-in WebUI lives at :8181; the day-to-day UI is
+  # Flood (below), which talks to the same Web API at qbittorrent:8080.
 
   qbittorrent:
     container_name: qbittorrent
@@ -184,7 +186,6 @@ services:
       - PGID=1000
       - TZ=America/Los_Angeles
       - WEBUI_PORT=8080
-      - DOCKER_MODS=ghcr.io/gabe565/linuxserver-mod-vuetorrent:latest
     volumes:
       - ./services/qbittorrent/config:/config
       - /mnt/tank/downloads:/downloads
@@ -192,6 +193,41 @@ services:
       - "6881:6881"
       - "6881:6881/udp"
       - "8181:8080"
+
+  # ─── Torrent Web UI ───────────────────────────────────────────────────────
+  # Flood is a standalone web UI for qBittorrent — a separate container, NOT a
+  # qBittorrent WebUI mod (it replaces the old gabe565 VueTorrent DOCKER_MOD).
+  # auth=none disables Flood's own user management and reads the qBittorrent
+  # connection from the env vars below; QBIT_PASSWORD is the same value
+  # setup_script.sh seeds into qBittorrent.conf, so the two stay in sync.
+  # Access is gated at the network layer (LAN / Tailscale / NPM).
+  # Runs as 1000:1000 (jesec/flood has no PUID/PGID) so /data and /downloads
+  # ownership matches the rest of the stack; HOME=/data keeps stray writes in
+  # the mounted volume.
+
+  flood:
+    container_name: flood
+    image: jesec/flood:latest
+    restart: unless-stopped
+    user: "1000:1000"
+    networks:
+      - homelab
+    environment:
+      - HOME=/data
+      - FLOOD_OPTION_host=0.0.0.0
+      - FLOOD_OPTION_rundir=/data
+      - FLOOD_OPTION_auth=none
+      - FLOOD_OPTION_qburl=http://qbittorrent:8080
+      - FLOOD_OPTION_qbuser=admin
+      - FLOOD_OPTION_qbpass=${QBIT_PASSWORD}
+      - FLOOD_OPTION_allowedpath=/downloads
+    volumes:
+      - ./services/flood/data:/data
+      - /mnt/tank/downloads:/downloads
+    ports:
+      - "3004:3000"
+    depends_on:
+      - qbittorrent
 
   # ─── Photo Management ─────────────────────────────────────────────────────
 
@@ -436,6 +472,7 @@ services:
       - radarr
       - sonarr
       - qbittorrent
+      - flood
       - immich-server
       - seerr
       - speedtest-tracker

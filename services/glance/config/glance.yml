@@ -345,8 +345,8 @@ pages:
               - title: Profilarr
                 url: http://profilarr:6868
                 same-tab: true
-              - title: qBittorrent
-                url: http://qbittorrent:8080
+              - title: Flood
+                url: http://flood:3000
                 same-tab: true
               - title: Immich
                 url: http://immich-server:2283
@@ -479,8 +479,8 @@ pages:
                     url: http://192.168.0.10:6767
                   - title: Profilarr
                     url: http://192.168.0.10:6868
-                  - title: qBittorrent
-                    url: http://192.168.0.10:8181
+                  - title: Flood
+                    url: http://192.168.0.10:3004
                   - title: Immich
                     url: http://192.168.0.10:2283
                   - title: RomM
@@ -515,8 +515,8 @@ pages:
                     url: http://${TAILSCALE_HOSTNAME}:6767
                   - title: Profilarr
                     url: http://${TAILSCALE_HOSTNAME}:6868
-                  - title: qBittorrent
-                    url: http://${TAILSCALE_HOSTNAME}:8181
+                  - title: Flood
+                    url: http://${TAILSCALE_HOSTNAME}:3004
                   - title: Immich
                     url: http://${TAILSCALE_HOSTNAME}:2283
                   - title: RomM
@@ -716,6 +716,7 @@ pages:
               - santiagosayshey/profilarr
               - seerr-team/seerr
               - qbittorrent/qBittorrent
+              - jesec/flood
               - immich-app/immich
               - rommapp/romm
               - louislam/uptime-kuma
