@@ -229,6 +229,40 @@ services:
     depends_on:
       - qbittorrent
 
+  # ─── Archive Extractor ────────────────────────────────────────────────────
+  # Sonarr/Radarr detect but never unpack scene-style multi-part .rar/.zip
+  # releases — they sit in the queue as "Found archive file, might need to be
+  # extracted" and never import. Unpackerr watches the Sonarr/Radarr queues,
+  # extracts those archives in place, lets the *arr import the result, then
+  # deletes the extracted copies once the queue item clears. No web UI — it's a
+  # background worker configured entirely via env (no mounted config file).
+  # Reuses the existing Sonarr/Radarr API keys from .env (same ones Glance
+  # uses), so no new credentials are needed. The /downloads mount MUST match
+  # the path Sonarr/Radarr use (/mnt/tank/downloads:/downloads) or Unpackerr
+  # can't find the files the queue references. Runs as 1000:1000 (like Flood)
+  # so extracted files are owned consistently and the *arr can import them.
+
+  unpackerr:
+    container_name: unpackerr
+    image: golift/unpackerr
+    restart: unless-stopped
+    user: "1000:1000"
+    networks:
+      - homelab
+    environment:
+      - TZ=America/Los_Angeles
+      - UN_SONARR_0_URL=http://sonarr:8989
+      - UN_SONARR_0_API_KEY=${SONARR_API_KEY}
+      - UN_SONARR_0_PATHS_0=/downloads
+      - UN_RADARR_0_URL=http://radarr:7878
+      - UN_RADARR_0_API_KEY=${RADARR_API_KEY}
+      - UN_RADARR_0_PATHS_0=/downloads
+    volumes:
+      - /mnt/tank/downloads:/downloads
+    depends_on:
+      - sonarr
+      - radarr
+
   # ─── Photo Management ─────────────────────────────────────────────────────
 
   immich-server:

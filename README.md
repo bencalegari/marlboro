@@ -18,6 +18,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.1
 - **Flaresolverr** — Cloudflare bypass proxy for Prowlarr indexers
 - **qBittorrent** — Torrent client (BitTorrent engine)
 - **Flood** — Web UI for qBittorrent
+- **Unpackerr** — Auto-extracts `.rar`/`.zip` releases so Radarr/Sonarr can import them
 - **Immich** — Self-hosted photo/video library with mobile backup
 - **RomM** — ROM manager and in-browser emulator
 - **Portainer** — Docker management UI
@@ -51,6 +52,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.1
 | Flaresolverr | 8191 | Internal proxy only |
 | qBittorrent | 8181 | Built-in WebUI; internal container port is 8080 |
 | Flood | 3004 | Main torrent UI (front-end for qBittorrent); internal container port is 3000 |
+| Unpackerr | — | Background archive extractor for the Arr stack; no web UI |
 | Immich | 2283 | |
 | RomM | 7070 | |
 | Portainer | 9000 | |
@@ -701,6 +703,27 @@ Repeat in Sonarr.
 4. Connect Radarr: host `radarr`, port `7878`, uncheck 4K Server
 5. Connect Sonarr: host `sonarr`, port `8989`
 
+### 10.10 Unpackerr (automatic archive extraction)
+
+Sonarr and Radarr **detect** scene-style multi-part `.rar`/`.zip` releases but never unpack them — the grab downloads fine, then sits in the queue forever with *"Found archive file, might need to be extracted"* and never imports. Unpackerr is the companion worker that fixes this: it polls the Sonarr/Radarr queues, extracts any archived release in place, lets the *arr import the result, then deletes the extracted copies once the queue item clears.
+
+There is **nothing to configure in a web UI** — Unpackerr has none. It's wired entirely through `docker-compose.yml` and reuses the existing Sonarr/Radarr API keys from `.env` (the same `SONARR_API_KEY`/`RADARR_API_KEY` that Glance uses), so no new credentials and no setup-script changes are needed:
+
+- It mounts `/mnt/tank/downloads:/downloads` — **the same path Radarr/Sonarr use.** This is the one hard requirement: Unpackerr matches the queue item's download path against this mount, so if it ever drifts from the *arr mount, extraction silently does nothing.
+- It runs as `1000:1000` so extracted files are owned consistently and the *arr can import them.
+
+Start it and confirm it connected to both apps:
+
+```bash
+docker compose up -d unpackerr
+docker logs unpackerr | grep -iE 'sonarr|radarr|extract'
+# Expect lines like "Watching Sonarr: http://sonarr:8989" / "Watching Radarr: ..."
+```
+
+To force a test, leave a `.rar` release stuck in a queue (or wait for the next one) — within `UN_INTERVAL` (default 2m) Unpackerr logs `Extracted` and the item imports on the next Sonarr/Radarr scan. No new indexers or download clients are needed; this only changes what happens *after* a download completes.
+
+> **Caveat:** Unpackerr only acts on items currently in a Sonarr/Radarr queue. Archives that were already abandoned/removed from the queue (like a one-time backlog) still need a manual `unrar` — it's the *going-forward* automation, not a retroactive cleanup.
+
 ---
 
 ## Part 11: Portainer
@@ -834,15 +857,16 @@ tailscale ssh <your-username>@<tailscale-hostname>
 4. **Flaresolverr** — register in Prowlarr, add `flare` tag
 5. **Prowlarr** — add indexers, connect to Radarr/Sonarr
 6. **Radarr/Sonarr** — root folders, connect to qBittorrent and Jellyfin
-7. **Bazarr** — connect to Radarr/Sonarr, add subtitle providers
-8. **Profilarr** — link Dictionarry, connect instances, sync
-9. **Jellyfin** — create Libraries (Movies → `/media/movies`, TV → `/media/tv`)
-10. **Seerr** — connect to Jellyfin, Radarr, Sonarr
-11. **Immich** — admin account, enable mobile backup
-12. **RomM** — admin account, add metadata API keys
-13. **Portainer** — set admin password
-14. **Sunshine** — pair first Moonlight client
-15. **Glance** — verify all services green
+7. **Unpackerr** — no setup; `docker logs unpackerr` should show it watching Sonarr/Radarr
+8. **Bazarr** — connect to Radarr/Sonarr, add subtitle providers
+9. **Profilarr** — link Dictionarry, connect instances, sync
+10. **Jellyfin** — create Libraries (Movies → `/media/movies`, TV → `/media/tv`)
+11. **Seerr** — connect to Jellyfin, Radarr, Sonarr
+12. **Immich** — admin account, enable mobile backup
+13. **RomM** — admin account, add metadata API keys
+14. **Portainer** — set admin password
+15. **Sunshine** — pair first Moonlight client
+16. **Glance** — verify all services green
 
 ---
 
