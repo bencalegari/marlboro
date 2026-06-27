@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.10 (Questing Quokka).
+This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.04 LTS (Resolute), booting the 25.10 "questing" t2 kernel — see [Part 18](#upgrading-the-ubuntu-release-t2-aware) for why the kernel stays pinned.
 
 - **Jellyfin** — Media server with Intel QuickSync hardware transcoding
 - **Plex** — Second media server (existing plex.tv account) with QuickSync transcoding
@@ -99,7 +99,7 @@ op item get "Marlboro NAS - Network" --vault Private
 
 ### Key Caveats
 
-**Ubuntu 25.10 reaches end-of-life July 2026.** Upgrading to 26.04 LTS on this T2 Mac is *not* a plain `sudo do-release-upgrade` — the upgrader disables the t2linux kernel repo, which can orphan the T2 kernel (it gets offered for removal) or leave the machine booting a stock kernel with no T2 audio/Wi-Fi/Bluetooth. Follow the T2-aware procedure in [Part 18 → Upgrading the Ubuntu Release](#upgrading-the-ubuntu-release-t2-aware).
+**Now on Ubuntu 26.04 LTS, booting the 25.10 "questing" t2 kernel.** The 26.04 upgrade on this T2 Mac was *not* a plain `sudo do-release-upgrade` — the upgrader disables the t2linux kernel repo, which can orphan the T2 kernel (it gets offered for removal) or leave the machine booting a stock kernel with no T2 audio/Wi-Fi/Bluetooth. The 26.04 "resolute" kernel additionally hangs at boot on this box, so GRUB stays pinned to the questing kernel (a working steady state — *not* a failed upgrade). Full T2-aware procedure + the boot-hang details in [Part 18 → Upgrading the Ubuntu Release](#upgrading-the-ubuntu-release-t2-aware).
 
 **Jellyfin uses host networking.** Reference it from other containers via `http://host.docker.internal:8096` or `http://<server-ip>:8096`, not `http://jellyfin:8096`.
 
@@ -115,7 +115,7 @@ op item get "Marlboro NAS - Network" --vault Private
 
 **Flood is a separate container, not a qBittorrent WebUI mod.** It replaces the old VueTorrent `DOCKER_MODS` entry. Flood runs with `--auth none` (no Flood-level login — the stack is gated at the network layer) and connects to qBittorrent via `FLOOD_OPTION_qburl=http://qbittorrent:8080`, seeded with `QBIT_PASSWORD` (the same value `setup_script.sh` writes into `qBittorrent.conf`). qBittorrent's own WebUI still works at `:8181`. To require a login on Flood instead, set `FLOOD_OPTION_auth=default`, drop the `qburl`/`qbuser`/`qbpass` vars, and configure the connection in Flood's first-run wizard.
 
-**Watchtower requires `DOCKER_API_VERSION=1.54`** on Ubuntu 25.10. This pin tracks the host Docker engine's API version, so revisit it after an OS upgrade (26.04 ships a newer engine) — match `docker version --format '{{.Server.APIVersion}}'`.
+**Watchtower requires `DOCKER_API_VERSION=1.55`** to match the 26.04 host Docker engine. This pin tracks the host engine's API version, so revisit it after any OS/engine upgrade — match `docker version --format '{{.Server.APIVersion}}'`.
 
 **Sunshine runs as an AppImage** with Sway as the Wayland compositor. Managed via `systemctl --user`.
 
@@ -1077,6 +1077,19 @@ done
 
 This uses DuckDNS (`marlboro-bc.duckdns.org`) for dynamic DNS and NPM for the reverse proxy with a free Let's Encrypt TLS certificate. After this, Jellyfin is reachable at `https://jellyfin.marlboro-bc.duckdns.org` from anywhere on the internet.
 
+### 19.0 Reconcile Proxy Hosts from the Repo (scripted)
+
+The proxy topology is codified in [`setup_proxy_hosts.sh`](./setup_proxy_hosts.sh) — a declarative `HOSTS=( … )` list of `domain | forward_host | forward_port | websockets | ssl_forced` rows. Run it **after `docker compose up -d`** (NPM up on `:81`, DuckDNS reachable) to create any missing proxy host plus its DNS-01 Let's Encrypt cert through the NPM API:
+
+```bash
+cd ~/marlboro
+./setup_proxy_hosts.sh
+```
+
+It reads `NGINX_EMAIL_ID` / `NGINX_PASSWORD` / `DUCKDNS_TOKEN` from `.env`. **Idempotent:** existing hosts are skipped and never modified, so manual tweaks survive and re-runs are safe. To expose a new service, add a row to `HOSTS` and re-run.
+
+What it does **not** do (still manual, per the sections below): router port-forwarding (19.1), the AdGuard DNS rewrite (19.5 — one wildcard rule covers all subdomains), and app-side public-URL config (e.g. Jellyfin 19.6, Plex 19.10 step 3). Host-networked services (Jellyfin, Plex, Coolify, the apex) forward to the LAN IP `192.168.0.10`; bridge services (Seerr, Forgejo) forward to their container name.
+
 ### 19.1 Forward Ports on the Router
 
 On your TP-Link BE3600 (**Advanced → NAT Forwarding → Virtual Servers**), forward to `<server-ip>`:
@@ -1115,6 +1128,8 @@ docker compose up -d nginx-proxy-manager
 ```
 
 ### 19.4 Create the Jellyfin Proxy Host in NPM
+
+> **Fastest path:** [`setup_proxy_hosts.sh`](#190-reconcile-proxy-hosts-from-the-repo-scripted) already creates this host (and its cert) from the repo. The manual steps below are the same thing by hand — and the source of *why* each setting is what it is (websockets, DNS-01, force SSL).
 
 1. Open NPM at `http://<server-ip>:81`
 2. **Proxy Hosts → Add Proxy Host**
@@ -1205,15 +1220,17 @@ NPM communicates with Jellyfin via `host.docker.internal` which resolves to the 
 
 ### 19.10 Also Expose Plex
 
-Plex ships its own remote-access (plex.tv relay / direct connect on `:32400`), so native Plex apps (mobile, TV, etc.) reach the server without any of this. NPM is for a clean HTTPS URL to the **web app** at `https://plex.marlboro-bc.duckdns.org`. Setup mirrors 19.4 — the wildcard cert and AdGuard rewrite from 19.4/19.5 already cover the `plex` subdomain, so there's nothing extra to add there.
+Plex ships its own remote-access (plex.tv relay / direct connect on `:32400`), so native Plex apps (mobile, TV, etc.) reach the server without any of this. NPM is for a clean HTTPS URL to the **web app** at `https://plex.marlboro-bc.duckdns.org`. Setup mirrors 19.4. The AdGuard wildcard rewrite from 19.5 already covers the `plex` subdomain (it's a DNS rule), but the TLS certs here are **per-subdomain — there is no wildcard cert** — so a new `plex.marlboro-bc.duckdns.org` cert is issued via DNS-01 below.
+
+> **Fastest path:** [`setup_proxy_hosts.sh`](#190-reconcile-proxy-hosts-from-the-repo-scripted) already creates this host (and its cert) from the repo. The manual steps below are the same thing by hand.
 
 1. NPM → **Proxy Hosts → Add Proxy Host → Details tab:**
    - Domain Names: `plex.marlboro-bc.duckdns.org`
    - Scheme: `http`
-   - Forward Hostname / IP: `host.docker.internal`
+   - Forward Hostname / IP: `192.168.0.10` (the host's LAN IP — Plex is on host networking; `host.docker.internal` works too)
    - Forward Port: `32400`
    - Enable: **Websockets Support** (Plex uses them for the web client)
-2. **SSL tab:** select the existing `*.marlboro-bc.duckdns.org` wildcard cert (or request one via DNS-01 exactly as in 19.4), then **Force SSL** + **HTTP/2 Support**.
+2. **SSL tab:** **Request a new SSL Certificate** via the **DNS-01 / DuckDNS** challenge exactly as in 19.4 (each subdomain gets its own cert — there's no shared wildcard), then **Force SSL** + **HTTP/2 Support**.
 3. In Plex → **Settings → Network**:
    - **Custom server access URLs:** `https://plex.marlboro-bc.duckdns.org:443`
    - **Secure connections:** `Preferred`

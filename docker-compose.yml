@@ -466,7 +466,7 @@ services:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_SCHEDULE=0 0 4 * * *
       - TZ=America/Los_Angeles
-      - DOCKER_API_VERSION=1.54           # tracks host engine API; re-check after OS upgrade (see README → Upgrading the Ubuntu Release)
+      - DOCKER_API_VERSION=1.55           # tracks host engine API (26.04 = 1.55); re-check after OS upgrade (see README → Upgrading the Ubuntu Release)
 
   # ─── Uptime Monitoring ────────────────────────────────────────────────────
 
