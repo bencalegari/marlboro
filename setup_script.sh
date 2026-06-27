@@ -133,6 +133,13 @@ IMMICH_DB_PASSWORD=$(pull_field "Marlboro NAS - Immich DB" password)
 # Consumed by both qBittorrent (seeded into qBittorrent.conf below) and Flood
 # (FLOOD_OPTION_qbpass), which connects to qBittorrent's Web API with auth=none.
 QBIT_PASSWORD=$(pull_field "Marlboro NAS - qBittorrent" password)
+# Plex one-time claim token — intentionally BLANK; not a stored secret (expires
+# 4 min after issue at https://plex.tv/claim). To link the Plex server to the
+# account on first start, pass it inline instead of editing this file:
+#   PLEX_CLAIM=claim-xxxx docker compose up -d plex
+# After the server is claimed once, blank is correct — the permanent server token
+# lives in services/plex/config. Declared so compose doesn't warn on \${PLEX_CLAIM}.
+PLEX_CLAIM=
 ROMM_ROOT_PASSWORD=$(pull_field "Marlboro NAS - RomM DB Root" password)
 ROMM_DB_PASSWORD=$(pull_field "Marlboro NAS - RomM DB" password)
 ROMM_SECRET_KEY=$(pull_field "Marlboro NAS - RomM Auth Secret" password)

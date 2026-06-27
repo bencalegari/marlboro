@@ -320,6 +320,11 @@ pages:
                 same-tab: true
               - title: Jellyfin (External)
                 url: http://marlboro-bc.duckdns.org
+              - title: Plex
+                url: http://192.168.0.10:32400/web
+                same-tab: true
+              - title: Plex (External)
+                url: https://plex.marlboro-bc.duckdns.org
               - title: AdGuard Home
                 url: http://adguard:3001
                 same-tab: true
@@ -378,6 +383,7 @@ pages:
               tooltip-enabled: true
               # icon overrides: <stripped-subdomain>: <simpleicons-id | full-url>
               jellyfin: jellyfin
+              plex: plex
               immich: immich
               portainer: portainer
               glance: https://cdn.jsdelivr.net/gh/selfhst/icons/svg/glance-dark.svg
@@ -467,6 +473,8 @@ pages:
                     url: http://192.168.0.10:3001
                   - title: Jellyfin
                     url: http://192.168.0.10:8096
+                  - title: Plex
+                    url: http://192.168.0.10:32400/web
                   - title: Seerr
                     url: http://192.168.0.10:5055
                   - title: Prowlarr
@@ -503,6 +511,8 @@ pages:
                     url: http://${TAILSCALE_HOSTNAME}:3001
                   - title: Jellyfin
                     url: http://${TAILSCALE_HOSTNAME}:8096
+                  - title: Plex
+                    url: http://${TAILSCALE_HOSTNAME}:32400/web
                   - title: Seerr
                     url: http://${TAILSCALE_HOSTNAME}:5055
                   - title: Prowlarr
@@ -535,6 +545,8 @@ pages:
                 links:
                   - title: Jellyfin (DuckDNS)
                     url: http://marlboro-bc.duckdns.org
+                  - title: Plex (DuckDNS)
+                    url: https://plex.marlboro-bc.duckdns.org
                   - title: Coolify
                     url: https://coolify.marlboro-bc.duckdns.org
                   - title: Tailscale Admin
@@ -707,6 +719,7 @@ pages:
             repositories:
               - glanceapp/glance
               - jellyfin/jellyfin
+              - linuxserver/docker-plex
               - LizardByte/Sunshine
               - AdguardTeam/AdGuardHome
               - linuxserver/docker-prowlarr

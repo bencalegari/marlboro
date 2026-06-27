@@ -5,6 +5,7 @@
 This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.10 (Questing Quokka).
 
 - **Jellyfin** — Media server with Intel QuickSync hardware transcoding
+- **Plex** — Second media server (existing plex.tv account) with QuickSync transcoding
 - **AdGuard Home** — Network-wide DNS ad blocking
 - **Sunshine** — Game streaming host (Moonlight client)
 - **Steam** — Light gaming on the Mac Mini
@@ -40,6 +41,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 25.1
 |---|---|---|
 | Glance Dashboard | 8080 | Main homelab UI |
 | Jellyfin | host network | Uses host networking for DLNA |
+| Plex | host network (32400) | Host networking for GDM discovery + remote access |
 | AdGuard (setup) | 3000 | First-run wizard only |
 | AdGuard (web UI) | 3001 | After initial setup |
 | AdGuard (DNS) | 53 TCP/UDP | Set this as your router's DNS |
@@ -100,6 +102,8 @@ op item get "Marlboro NAS - Network" --vault Private
 **Ubuntu 25.10 reaches end-of-life July 2026.** Upgrading to 26.04 LTS on this T2 Mac is *not* a plain `sudo do-release-upgrade` — the upgrader disables the t2linux kernel repo, which can orphan the T2 kernel (it gets offered for removal) or leave the machine booting a stock kernel with no T2 audio/Wi-Fi/Bluetooth. Follow the T2-aware procedure in [Part 18 → Upgrading the Ubuntu Release](#upgrading-the-ubuntu-release-t2-aware).
 
 **Jellyfin uses host networking.** Reference it from other containers via `http://host.docker.internal:8096` or `http://<server-ip>:8096`, not `http://jellyfin:8096`.
+
+**Plex also uses host networking** (for GDM discovery and direct remote access on `:32400`). Reference it from other containers via `http://host.docker.internal:32400` or `http://<server-ip>:32400`, not `http://plex:32400`. Two consequences of running both media servers in host mode: (1) they both want UDP `1900` for DLNA/SSDP — leave Plex's DLNA disabled (the default) so it doesn't collide with Jellyfin; (2) Plex's QuickSync hardware transcoding requires an **active Plex Pass** — this account's pass **expires November 2026**, after which Plex transcodes on CPU (Jellyfin's QSV is unaffected). The `PLEX_CLAIM` token only links the server to the account on first start; see [Part 16.6](#part-166-plex-media-server).
 
 **`host.docker.internal` requires `extra_hosts` on Linux.** Added to Radarr, Sonarr, Bazarr, Profilarr, Seerr, and Coolify in the compose file.
 
@@ -861,12 +865,13 @@ tailscale ssh <your-username>@<tailscale-hostname>
 8. **Bazarr** — connect to Radarr/Sonarr, add subtitle providers
 9. **Profilarr** — link Dictionarry, connect instances, sync
 10. **Jellyfin** — create Libraries (Movies → `/media/movies`, TV → `/media/tv`)
-11. **Seerr** — connect to Jellyfin, Radarr, Sonarr
-12. **Immich** — admin account, enable mobile backup
-13. **RomM** — admin account, add metadata API keys
-14. **Portainer** — set admin password
-15. **Sunshine** — pair first Moonlight client
-16. **Glance** — verify all services green
+11. **Plex** — claim with `PLEX_CLAIM`, create Libraries pointing at the same `/media/movies` and `/media/tv` (see Part 16.6)
+12. **Seerr** — connect to Jellyfin, Radarr, Sonarr (optionally add Plex too)
+13. **Immich** — admin account, enable mobile backup
+14. **RomM** — admin account, add metadata API keys
+15. **Portainer** — set admin password
+16. **Sunshine** — pair first Moonlight client
+17. **Glance** — verify all services green
 
 ---
 
@@ -894,6 +899,63 @@ Then on each client, lower **Home network quality** below the source bitrate (e.
 > **Why not commit `encoding.xml`?** Jellyfin rewrites it whenever any dashboard setting changes (subtitles, deinterlacing, etc.), so tracking it creates constant noise diffs. It's gitignored under `services/*`. Re-apply the settings above on a fresh install.
 
 > **Verify transcoding is using the GPU:** during playback, `docker logs jellyfin --tail 50` should show ffmpeg invoked with `-hwaccel qsv` and `vpp_qsv` / `tonemap_vaapi` filters. `intel_gpu_top` on the host (from `intel-gpu-tools`) shows live engine utilization.
+
+---
+
+## Part 16.6: Plex Media Server
+
+Plex runs alongside Jellyfin as a second media server, pointed at the **same** library on disk (`/mnt/tank/media`, mounted as `/media` inside the container). It's a separate `plexinc`-compatible server *instance* linked to an existing plex.tv account — the account's other servers (on the old PC) are untouched.
+
+Like Jellyfin, Plex uses `network_mode: host` so GDM discovery and direct remote access work; it listens on `:32400`.
+
+### 16.6.1 Get a Claim Token
+
+The claim token links this new server instance to your account on first start. While **signed in to plex.tv in a browser**, open:
+
+```
+https://plex.tv/claim
+```
+
+Copy the `claim-xxxxxxxxxxxxxxxxxxxx` value. **It expires 4 minutes after issue**, so grab it right before the next step.
+
+### 16.6.2 First Start (Claim)
+
+Pass the token **inline** — do *not* hand-edit `.env`, because `setup_script.sh` regenerates `.env` with a blank `PLEX_CLAIM` on every run (the token is ephemeral and intentionally not stored in 1Password):
+
+```bash
+cd ~/marlboro
+PLEX_CLAIM=claim-xxxxxxxxxxxxxxxxxxxx docker compose up -d plex
+```
+
+Watch it come up and confirm it claimed the server:
+
+```bash
+docker logs plex --tail 30   # look for the server registering against your account
+```
+
+Once claimed, the permanent server token is written to `./services/plex/config` (gitignored under `services/*`). On every subsequent `docker compose up -d plex`, a blank `PLEX_CLAIM` is correct — the server is already linked.
+
+### 16.6.3 Create Libraries
+
+Open Plex at `http://<server-ip>:32400/web` — you should already be signed in via the claim. During (or after) the setup wizard, add libraries pointing at the in-container paths (the same content Jellyfin serves):
+
+- **Movies** → `/media/movies`
+- **TV Shows** → `/media/tv`
+
+> **Don't enable DLNA** (Settings → DLNA). Jellyfin already binds UDP `1900` for DLNA/SSDP on the host network; enabling it on Plex too causes a bind conflict. Leave it off (the default).
+
+### 16.6.4 Hardware Transcoding (Plex Pass)
+
+`/dev/dri` is already passed to the container in `docker-compose.yml`. In Plex, **Settings → Transcoder**:
+
+- **Use hardware acceleration when available**: ✅
+- **Use hardware-accelerated video encoding**: ✅ (HEVC encode on the UHD 630)
+
+> **Requires an active Plex Pass.** This account's pass **expires November 2026** — after that, hardware transcoding silently stops and Plex falls back to CPU transcoding (Jellyfin's QSV path is independent and unaffected). To confirm HW is engaged: during a transcode, **Settings → Status → Now Playing** shows `(hw)` next to the transcode session, and `intel_gpu_top` on the host shows Video/VideoEnhance engine load.
+
+### 16.6.5 (Optional) Add Plex to Seerr
+
+Seerr (the Jellyseerr fork) can drive requests from Plex as well as Jellyfin. In Seerr → **Settings → Plex**, sign in and select this server. Radarr/Sonarr connections are already configured from the Jellyfin setup and are shared.
 
 ---
 
@@ -1140,6 +1202,31 @@ sudo ufw deny 8096
 ```
 
 NPM communicates with Jellyfin via `host.docker.internal` which resolves to the host's bridge gateway address — traffic stays local, so this rule doesn't block the proxy.
+
+### 19.10 Also Expose Plex
+
+Plex ships its own remote-access (plex.tv relay / direct connect on `:32400`), so native Plex apps (mobile, TV, etc.) reach the server without any of this. NPM is for a clean HTTPS URL to the **web app** at `https://plex.marlboro-bc.duckdns.org`. Setup mirrors 19.4 — the wildcard cert and AdGuard rewrite from 19.4/19.5 already cover the `plex` subdomain, so there's nothing extra to add there.
+
+1. NPM → **Proxy Hosts → Add Proxy Host → Details tab:**
+   - Domain Names: `plex.marlboro-bc.duckdns.org`
+   - Scheme: `http`
+   - Forward Hostname / IP: `host.docker.internal`
+   - Forward Port: `32400`
+   - Enable: **Websockets Support** (Plex uses them for the web client)
+2. **SSL tab:** select the existing `*.marlboro-bc.duckdns.org` wildcard cert (or request one via DNS-01 exactly as in 19.4), then **Force SSL** + **HTTP/2 Support**.
+3. In Plex → **Settings → Network**:
+   - **Custom server access URLs:** `https://plex.marlboro-bc.duckdns.org:443`
+   - **Secure connections:** `Preferred`
+   - Add your server's LAN IP under **List of IP addresses and networks that are allowed without auth** only if you want unauthenticated LAN access (optional).
+
+> Plex validates the TLS cert against the hostname, so the `Custom server access URLs` entry must match the NPM domain exactly. Without it, the web app loads but the player may refuse the connection as insecure.
+
+To block direct internet access to the raw `:32400` port while keeping the proxy (same idea as 19.9):
+
+```bash
+sudo ufw allow from 127.0.0.1 to any port 32400
+sudo ufw deny 32400
+```
 
 ---
 

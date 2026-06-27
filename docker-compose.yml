@@ -15,6 +15,34 @@ services:
     devices:
       - /dev/dri:/dev/dri  # Intel UHD 630 QuickSync hardware transcode
 
+  # Plex — second media server alongside Jellyfin, linked to an existing plex.tv
+  # account. Host networking (like Jellyfin) for GDM discovery + direct remote
+  # access on :32400. PLEX_CLAIM links THIS server instance to the account on
+  # first start ONLY (token from https://plex.tv/claim, valid 4 min); it stays
+  # blank in .env afterward and the permanent server token lives in
+  # ./services/plex/config. /dev/dri enables Intel QuickSync HW transcode — needs
+  # an active Plex Pass (this account's pass expires Nov 2026; transcode falls
+  # back to CPU after that). NOTE: both servers want UDP 1900 (DLNA/SSDP) under
+  # host networking — if DLNA is enabled on both they conflict; leave Plex DLNA
+  # off (the default).
+
+  plex:
+    container_name: plex
+    image: lscr.io/linuxserver/plex
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los_Angeles
+      - VERSION=docker
+      - PLEX_CLAIM=${PLEX_CLAIM}
+    volumes:
+      - ./services/plex/config:/config
+      - /mnt/tank/media:/media
+    devices:
+      - /dev/dri:/dev/dri  # Intel UHD 630 QuickSync (Plex Pass only; expires Nov 2026)
+
   # ─── DNS / Ad Blocking ────────────────────────────────────────────────────
 
   adguard:
@@ -501,6 +529,7 @@ services:
       - "8080:8080"
     depends_on:
       - jellyfin
+      - plex
       - adguard
       - prowlarr
       - radarr
