@@ -4,7 +4,8 @@ services:
 
   jellyfin:
     container_name: jellyfin
-    image: jellyfin/jellyfin
+    # Minor-pinned so Watchtower patches 10.11.x but won't jump to 10.12/next major.
+    image: jellyfin/jellyfin:10.11
     restart: unless-stopped
     network_mode: host  # required for DLNA auto-discovery
     environment:
@@ -295,8 +296,12 @@ services:
 
   immich-server:
     container_name: immich-server
-    image: ghcr.io/immich-app/immich-server:release
+    # Pinned: Immich ships breaking DB migrations across majors. Bump this and
+    # immich-machine-learning together, on purpose, after reading release notes.
+    image: ghcr.io/immich-app/immich-server:v3.0.1
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=false   # never auto-update; see comment above
     networks:
       - homelab
     environment:
@@ -319,8 +324,11 @@ services:
 
   immich-machine-learning:
     container_name: immich-machine-learning
-    image: ghcr.io/immich-app/immich-machine-learning:release
+    # Keep in lockstep with immich-server's tag.
+    image: ghcr.io/immich-app/immich-machine-learning:v3.0.1
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=false
     networks:
       - homelab
     environment:
@@ -337,8 +345,14 @@ services:
 
   immich-postgres:
     container_name: immich-postgres
-    image: tensorchord/pgvecto-rs:pg14-v0.2.0
+    # Immich-maintained image bundling vchord + pgvecto.rs + pgvector so v3 can
+    # auto-migrate the old `vectors` data to VectorChord (`vchord`) on first boot.
+    # Pinned major (pg14) — matches existing on-disk data. Do not float this tag.
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
     restart: unless-stopped
+    shm_size: 128mb
+    labels:
+      - com.centurylinklabs.watchtower.enable=false
     networks:
       - homelab
     environment:
@@ -352,7 +366,9 @@ services:
 
   romm-db:
     container_name: romm-db
-    image: mariadb:latest
+    # Major-pinned: mariadb:latest floats across DB-engine majors, which won't
+    # start on an old data dir. Stays in 12.x; bump deliberately + back up first.
+    image: mariadb:12
     restart: unless-stopped
     networks:
       - homelab
@@ -372,7 +388,8 @@ services:
 
   romm:
     container_name: romm
-    image: rommapp/romm:latest
+    # Major-pinned (next major 5.0 ships DB migrations). Bump with romm-db in mind.
+    image: rommapp/romm:4
     restart: unless-stopped
     networks:
       - homelab
@@ -416,7 +433,9 @@ services:
 
   nginx-proxy-manager:
     container_name: nginx-proxy-manager
-    image: jc21/nginx-proxy-manager
+    # Major-pinned: untagged floated to :latest. Holds all proxy hosts + certs;
+    # a surprise major could break routing. Stays in 2.x.
+    image: jc21/nginx-proxy-manager:2
     restart: unless-stopped
     networks:
       - homelab
@@ -581,6 +600,8 @@ services:
     container_name: coolify-realtime
     image: ghcr.io/coollabsio/coolify-realtime:latest
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=false   # update Coolify via its own UI, not Watchtower
     networks:
       - homelab
     ports:
@@ -593,8 +614,12 @@ services:
 
   coolify:
     container_name: coolify
+    # Build-hash tags upstream (no clean major); Coolify ships breaking migrations
+    # and self-updates via its own UI. Fenced from Watchtower rather than pinned.
     image: ghcr.io/coollabsio/coolify:latest
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=false
     networks:
       - homelab
       - coolify

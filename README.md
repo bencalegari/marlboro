@@ -117,6 +117,10 @@ op item get "Marlboro NAS - Network" --vault Private
 
 **Watchtower requires `DOCKER_API_VERSION=1.55`** to match the 26.04 host Docker engine. This pin tracks the host engine's API version, so revisit it after any OS/engine upgrade — match `docker version --format '{{.Server.APIVersion}}'`.
 
+**Watchtower watches every container (no `WATCHTOWER_LABEL_ENABLE`) and updates nightly at 4 AM.** That's fine for stateless services, but data-bearing apps that ship breaking DB migrations must not float — an unattended major bump can crash-loop or corrupt on-disk data (this bit Immich: a `:release` jump to v3 dropped pgvecto.rs while the DB image stayed put). Policy:
+- **Pin the tag** so Watchtower only patches within a safe line: `jellyfin:10.11`, `mariadb:12` (romm-db), `rommapp/romm:4`, `jc21/nginx-proxy-manager:2`, `codeberg.org/forgejo/forgejo:11`, `postgres:15-alpine`/`14-…` (coolify-db, immich-postgres). Bump these deliberately after reading release notes; **back up the DB first** for anything stateful.
+- **Fence with `com.centurylinklabs.watchtower.enable=false`** where there's no clean version tag or the app self-updates: Immich (`immich-server`/`immich-machine-learning`/`immich-postgres`, upgraded by hand in lockstep) and Coolify (`coolify`/`coolify-realtime`, update via Coolify's own UI).
+
 **Sunshine runs as an AppImage** with Sway as the Wayland compositor. Managed via `systemctl --user`.
 
 **Scrutiny monitors all 4 drives** (`/dev/sda`–`/dev/sdd`) via device passthrough. Its **Status Threshold is set to "Smart" (not "Both")** — Scrutiny's observed-failure-rate heuristic produces false positives on these Seagate ST8000DM004 drives (e.g. it fails `Spin_Up_Time` for an "observed failure rate >10%" even though the attribute's raw value is 0 and the drive's own SMART self-assessment passes). Smart-only makes the dashboard badge follow the drive's actual SMART verdict. This setting lives in the app-managed `scrutiny.db` (not tracked in git), so **re-apply it after a fresh setup** via Settings → "Metric Status Threshold" → *Smart*, or the API:
@@ -764,6 +768,12 @@ sudo rm -rf ~/marlboro/services/immich/postgres
 mkdir -p ~/marlboro/services/immich/postgres
 docker compose up -d immich-postgres
 ```
+
+### 12.1a Version pinning (do not let Watchtower float it)
+
+`immich-server` and `immich-machine-learning` are pinned to an exact version tag (not `:release`) and carry `com.centurylinklabs.watchtower.enable=false`. Immich ships **breaking DB migrations** across majors — a floating tag let Watchtower jump the server to a new major while the DB image stayed put, which crash-loops the server with `No vector extension found`. Bump both image tags together, on purpose, after reading the Immich release notes.
+
+The DB uses the Immich-maintained image `ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0`, which bundles **VectorChord (`vchord`)** plus pgvecto.rs (`vectors`) and pgvector — so v3+ auto-migrates the old `vectors` data to `vchord` and reindexes on first boot. Keep this tag pinned too. (History: the DB was originally `tensorchord/pgvecto-rs:pg14-v0.2.0`; pgvecto.rs was removed in Immich v3.) Before any Immich major upgrade, back up first: `docker exec immich-postgres pg_dumpall -U immich > ~/immich-pre-upgrade-$(date +%F).sql`.
 
 ### 12.2 Initial Setup
 
