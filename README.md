@@ -799,6 +799,18 @@ When you move to a new iPhone (or reinstall the app), Immich **re-scans the enti
 
 For a very large iCloud-only library the hashing pass can take a long time. Recent Immich versions speed reinstall matching by sending per-asset metadata to the server for quick checksum lookup, but the local hashing pass still has to happen once.
 
+**Reading the backup counters.** The backup screen splits the **Remainder** into **Preparing** (hashing — for iCloud assets, downloading the original into cache first; this is the slow, rate-limiting step) and **Ready for upload** (hashed and queued to hit the server). "Ready for upload" is *not* how many files will transfer — as each hits the server, anything with a matching checksum is confirmed backed up without sending bytes. Only the true diff actually uploads.
+
+### 12.3b App crash: `SqliteException(4618)` / disk I/O on WAL = phone out of space
+
+If the app dies to an unrecoverable **`SqliteException(4618): disk I/O error … PRAGMA journal_mode = WAL`**, the phone is **out of storage**. SQLite error 4618 is `SQLITE_IOERR_SHMOPEN` — it couldn't create the WAL shared-memory sidecar file because there's no free disk. The app can't even open its local tracking DB. This is the tail end of the "Download and Keep Originals" trap above: the Preparing stage keeps pulling iCloud originals into cache on an already-full disk until the next DB write fails.
+
+Recovery, in order:
+1. **Free real space first.** Settings → Photos → **Optimize iPhone Storage** (off "Download and Keep Originals"). Check Settings → General → iPhone Storage; the bulk is Photos originals + Immich's cache. Fastest reclaim is to **delete the Immich app** (dumps its cache and the corrupt DB), then reinstall.
+2. **If keeping the app, tap "Clear Data"** on the crash screen to reset the unopenable local DB.
+3. This is **safe** — Clear Data / reinstall only wipes the *local* backed-up record. The server keeps every uploaded asset and dedupes by checksum, so the app just re-hashes and re-confirms; nothing is duplicated or re-uploaded.
+4. Confirm **10+ GB free** (after iOS finishes evicting originals) before re-enabling backup. Otherwise iOS and Immich's cache fight over a full disk and it crashes again.
+
 ---
 
 ## Part 13: RomM Setup
