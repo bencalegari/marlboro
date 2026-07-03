@@ -783,7 +783,21 @@ Navigate to `http://<server-ip>:2283`, create admin account.
 
 Install **Immich** from the App Store:
 - Server URL: `http://<tailscale-ip>:2283` (Tailscale IP)
-- Enable **Background Backup**
+- Enable **Background Backup**, then select the albums to back up.
+
+**iCloud storage setting — leave iOS on "Optimize iPhone Storage."** In iOS **Settings → Photos**, keep the option set to **Optimize iPhone Storage**, *not* "Download and Keep Originals." Immich does not need originals pinned to the device: for any iCloud asset marked for backup it pulls the full-res original into a **temporary cache**, hashes and uploads it, then empties the cache. Flipping to "Download and Keep Originals" eagerly drags the entire iCloud library onto local disk, which maxes out phone storage and then starves Immich's cache so nothing uploads at all. If you've already hit this: switch back to Optimize iPhone Storage, offload/reinstall the Immich app to clear its cache, and reboot so iOS reclaims the evicted originals.
+
+**Backup runs best in the foreground.** iOS throttles background work, so background backup is unreliable for a large first sync. Open the app, plug in on Wi-Fi, and leave it foregrounded until the initial backup finishes.
+
+### 12.3a New phone / reinstall: the re-scan is expected (and harmless)
+
+When you move to a new iPhone (or reinstall the app), Immich **re-scans the entire library** and it can look alarming — it appears to want to upload everything again. This is expected:
+
+- **Why it re-scans.** iOS assigns brand-new local asset IDs on a new device, and Immich tracks "already backed up" by *device + local asset ID*. A new phone therefore looks like a fresh library, so every asset is re-examined. There is no way to skip this — the app must re-hash local assets to match them ([upstream discussion](https://github.com/immich-app/immich/discussions/4175)).
+- **It will not duplicate or re-upload.** Immich deduplicates **server-side by checksum (SHA-1)**. As it works through the library it pulls each original, hashes it, finds the checksum already on the server, and **skips the upload**. Nothing is duplicated; only genuinely-new photos (the diff) are actually uploaded. The cost is bandwidth and time to hash, not storage.
+- **Let it run.** Keep iOS on Optimize iPhone Storage (above), select the albums, plug in on Wi-Fi, and leave the app foregrounded. It cycles pull-to-cache → hash → skip-if-present → clear-cache, uploading only what's missing.
+
+For a very large iCloud-only library the hashing pass can take a long time. Recent Immich versions speed reinstall matching by sending per-asset metadata to the server for quick checksum lookup, but the local hashing pass still has to happen once.
 
 ---
 
