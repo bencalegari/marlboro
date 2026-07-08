@@ -13,11 +13,49 @@ pages:
           - type: server-stats
             servers:
               - type: local
+                # Host disks via the /host bind (see docker-compose.yml). Container
+                # "/" is glance's overlay, not the host — read the host root at /host.
+                hide-mountpoints-by-default: true
                 mountpoints:
-                  "/":
+                  "/host":
                     name: Root
+                    hide: false
                   "/mnt/tank":
                     name: Tank
+                    hide: false
+
+          # ── Scrutiny — drive health (SMART). Server-side fetch, so the docker
+          # name scrutiny:8080 works; data.summary is a WWN-keyed object, so use
+          # gjson's @values modifier to range over the drives.
+          - type: custom-api
+            title: Drive Health
+            title-url: http://192.168.0.10:8085
+            cache: 1h
+            url: http://scrutiny:8080/api/summary
+            template: |
+              {{/* Acknowledged WWNs: Scrutiny false-positives verified healthy via
+                   smartctl. Shown amber "Ack'd" not red. sda (0x5000c500e9c59b4a):
+                   Scrutiny flags Spin_Up_Time on its thresh=0 evaluation bug, but
+                   smartctl -H = PASSED and all critical attrs are 0. Add more with
+                   (or (eq $wwn "A") (eq $wwn "B")). */}}
+              {{ $acked := "0x5000c500e9c59b4a" }}
+              <ul class="list list-gap-10 collapsible-container" data-collapse-after="4">
+                {{ range .JSON.Array "data.summary.@values" }}
+                  {{ $status := .Int "device.device_status" }}
+                  {{ $temp := .Int "smart.temp" }}
+                  {{ $ack := and (ne $status 0) (eq (.String "device.wwn") $acked) }}
+                  <li class="flex items-center gap-10">
+                    {{ if eq $status 0 }}<div class="size-h3 color-positive">●</div>
+                    {{ else if $ack }}<div class="size-h3" style="color:#e0a54f">●</div>
+                    {{ else }}<div class="size-h3 color-negative">●</div>{{ end }}
+                    <div class="grow min-width-0">
+                      <div class="size-h4 color-highlight text-truncate" title="{{ .String "device.model_name" }}">{{ .String "device.device_name" }} · {{ .String "device.model_name" }}</div>
+                      <div class="text-very-compact color-subdue">{{ if eq $status 0 }}Passed{{ else if $ack }}Ack'd (healthy){{ else }}FAILED{{ end }} · {{ .Int "smart.power_on_hours" | formatNumber }}h on</div>
+                    </div>
+                    <div class="size-h4 shrink-0 {{ if ge $temp 50 }}color-negative{{ else }}color-paragraph{{ end }}">{{ $temp }}°C</div>
+                  </li>
+                {{ end }}
+              </ul>
 
           - type: clock
             hour-format: 12h

@@ -546,9 +546,27 @@ services:
     volumes:
       - ./services/glance/config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /proc:/proc:ro
       - /sys:/sys:ro
+      # Tank pool (ro), its own bind so server-stats can read it (the /host bind
+      # below is non-recursive, so it does NOT include /host/mnt/tank).
       - /mnt/tank:/mnt/tank:ro
+      # Host root (ro) so server-stats can report the host's disks (root SSD +
+      # tank) — in-container "/" is glance's own overlay (which lives on tank).
+      # Referenced as /host in glance.yml. Two non-obvious requirements:
+      #  1. bind.recursive: disabled — a normal (recursive) bind of / drags in
+      #     hundreds of host submounts (/host/snap/* squashfs, /host/dev, ...)
+      #     that pollute glance's mount enumeration and leave the root disk n/a.
+      #  2. host /proc is deliberately NOT bind-mounted — doing so makes glance
+      #     read the host mount table (no /host entry → root shows unavailable)
+      #     and spams /snap/* stat warnings. CPU/mem/load still report host-wide
+      #     without it (those /proc files aren't namespaced). Trade-off: the
+      #     widget's "uptime" reflects the glance container, not the host.
+      - type: bind
+        source: /
+        target: /host
+        read_only: true
+        bind:
+          recursive: disabled
     ports:
       - "8080:8080"
     depends_on:
