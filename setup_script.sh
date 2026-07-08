@@ -121,6 +121,11 @@ for item in "Marlboro NAS - Sonarr" "Marlboro NAS - Radarr" "Marlboro NAS - Tail
   fi
 done
 
+# Glance releases widget needs a read-only GitHub PAT — warn if the 1Password item is missing.
+if ! op item get "github.com" --vault "$VAULT" &>/dev/null; then
+  log "WARNING: 'github.com' not found in 1Password — GITHUB_TOKEN will be blank; Glance releases widget will hit GitHub's 60/hr rate limit"
+fi
+
 # ─── Pull Credentials & Write .env ────────────────────────────────────────────
 
 log "Pulling credentials from 1Password and writing $ENV_FILE..."
@@ -166,6 +171,9 @@ NGINX_PASSWORD=$(pull_field "Marlboro NAS - Nginx Proxy Manager" password)
 SPEEDTEST_URL=http://192.168.0.10:8765
 SPEEDTEST_APP_KEY=$(pull_field "Marlboro NAS - Speedtest App Key" password)
 SPEEDTEST_TRACKER_API_TOKEN=$(pull_field "Marlboro NAS - Speedtest Tracker" api_token)
+# Consumed by the Glance "releases" widget. All tracked repos are public, so a
+# read-only PAT lifts GitHub's anonymous 60/hr rate limit to 5000/hr.
+GITHUB_TOKEN=$(pull_field "github.com" token)
 EOF
 
 chmod 600 "$ENV_FILE"

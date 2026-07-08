@@ -537,6 +537,7 @@ services:
       - NGINX_PASSWORD=${NGINX_PASSWORD}
       - SPEEDTEST_URL=${SPEEDTEST_URL}
       - SPEEDTEST_TRACKER_API_TOKEN=${SPEEDTEST_TRACKER_API_TOKEN}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
     volumes:
       - ./services/glance/config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro

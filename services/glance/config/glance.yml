@@ -41,7 +41,7 @@ pages:
               interval: 30
               api-base-url: http://sonarr:8989
               key: ${SONARR_API_KEY}
-              url: http://192.168.0.10:8989/
+              url: http://192.168.0.10:8989
             template: &arr_template |
               {{ $collapseAfter := .Options.IntOr "collapse-after" 5 }}
               {{ $showGrabbed := .Options.BoolOr "show-grabbed" false }}
@@ -151,7 +151,7 @@ pages:
 
                       {{ if eq $service "sonarr" }}
                         {{ $series := "" }}
-                        {{ $coverBase = printf "%s/api/v3/mediacover" $apiBaseUrl }}
+                        {{ $coverBase = printf "%s/api/v3/mediacover" $url }}
                         {{ $coverUrl = printf "%s/%s/poster-500.jpg?apikey=%s" $coverBase (.String "seriesId") $key }}
                         {{ $title = .String "series.title" }}
                         {{ $link = printf "%s/series/%s#" $url (.String "series.titleSlug") }}
@@ -190,7 +190,7 @@ pages:
                       {{ else if eq $service "radarr" }}
                         {{ $movie := "" }}
                         {{ $status = .String "status" }}
-                        {{ $coverBase = printf "%s/api/v3/mediacover" $apiBaseUrl }}
+                        {{ $coverBase = printf "%s/api/v3/mediacover" $url }}
                         {{ if eq $status "announced"}}
                           {{ if ne (.String "inCinemas") "" }}
                             {{ $date = (.String "inCinemas" | parseTime "RFC3339") }}
@@ -302,7 +302,7 @@ pages:
               interval: 30
               api-base-url: http://radarr:7878
               key: ${RADARR_API_KEY}
-              url: http://192.168.0.10:7878/
+              url: http://192.168.0.10:7878
             template: *arr_template
 
       # ──────────────────────────────────────────────────────────────────────
@@ -325,6 +325,8 @@ pages:
                 same-tab: true
               - title: Plex (External)
                 url: https://plex.marlboro-bc.duckdns.org
+                alt-status-codes:
+                  - 401
               - title: AdGuard Home
                 url: http://adguard:3001
                 same-tab: true
@@ -716,6 +718,9 @@ pages:
 
           - type: releases
             cache: 6h
+            # Authenticated GitHub requests lift the anonymous 60/hr rate limit to
+            # 5000/hr. All repos below are public, so read access is enough.
+            token: ${GITHUB_TOKEN}
             repositories:
               - glanceapp/glance
               - jellyfin/jellyfin
@@ -726,7 +731,7 @@ pages:
               - Radarr/Radarr
               - Sonarr/Sonarr
               - morpheus65535/bazarr
-              - santiagosayshey/profilarr
+              - Dictionarry-Hub/profilarr
               - seerr-team/seerr
               - qbittorrent/qBittorrent
               - jesec/flood
