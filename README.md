@@ -371,7 +371,7 @@ Then reconcile all in-app settings from the repo — one idempotent script (safe
 to re-run; it converges and never clobbers manual edits):
 
 ```bash
-./setup_services.sh    # qBit, Sonarr/Radarr, Prowlarr, Profilarr, AdGuard, NPM proxy hosts + certs
+./setup_services.sh    # qBit, Sonarr/Radarr, Prowlarr, AdGuard, NPM proxy hosts + certs
 ```
 
 Run it once the containers are up. It configures everything that has an
@@ -696,34 +696,27 @@ Repeat in Sonarr.
 
 ### 10.8 Profilarr
 
-Profilarr git-syncs quality profiles + custom formats from the Dictionarry database into Sonarr/Radarr. **This stack now runs a single self-managed `Any` profile** in both apps (all qualities enabled, upgrades on, cutoff `Bluray-2160p` so it auto-climbs to the best available quality incl. 4K without chasing Remux). Because `Any` is a native profile Profilarr does not manage, **Profilarr is deliberately configured to push _no_ profiles** — it stays connected for the upstream database only.
+Profilarr syncs quality profiles + custom formats from the Dictionarry database (`Dictionarry-Hub/database`, branch `v2`) into Sonarr/Radarr. This stack runs Profilarr **v2** (image `ghcr.io/dictionarry-hub/profilarr`, pinned by `tag@sha256` digest in `docker-compose.yml`). v2 is a rewrite: new PCD 2.0 database format, mandatory login, and a database moved off the abandoned `santiagosayshey` Docker Hub image.
 
-**Manual** (first-run, in the Profilarr UI):
+**Current config:** the **`2160p Quality`** profile is synced to both apps and every movie/series is assigned to it (upgrades on → chases the best 4K release via Dictionarry's custom-format scoring, not just the highest tier). Delay profiles differ by app on purpose:
 
-1. **Settings → Databases**: add `https://github.com/Dictionarry-Hub/dictionarry`
-2. Add Radarr and Sonarr instances
+- **Sonarr — torrent delay `0`**: grab the first qualifying release the moment an episode airs, then upgrade continuously via RSS as better releases seed.
+- **Radarr — torrent delay `360` (6h)**: no rush on a film, so wait for the best release before grabbing (Dictionarry's default).
 
-**Scripted:** `setup_services.sh` clears each instance's synced-profile list
-(`arr_config.data_to_sync.profiles=[]`) so Profilarr pushes no profiles — run it
-after adding the instances, and any time you add/delete a quality profile.
+**v2 has no REST API** (it's a SvelteKit app driven by form actions), so setup is **UI-only** — `setup_services.sh` does **not** reconcile Profilarr. First-run, in the Profilarr UI (`http://192.168.0.10:6868`):
 
-> **Why:** Profilarr stores its per-instance profile list in
-> `arr_config.data_to_sync.profiles`. If you delete or rename a quality profile in
-> Sonarr/Radarr but leave it selected in Profilarr, the next Sync **re-creates the
-> deleted profile**. (Profilarr never touches the native `Any` profile, so manual
-> `Any` edits are safe.) `setup_services.sh` keeps the list empty; to do it by hand,
-> edit each arr connection in the UI and clear its selected profiles. The script
-> authenticates with the `api_key` from Profilarr's `auth` table in
-> `services/profilarr/config/profilarr.db` (header `X-Api-Key`).
+1. Create the admin **login** (v2 auth; local-network requests bypass it).
+2. **Add arr instances** — Radarr `http://192.168.0.10:7878`, Sonarr `http://192.168.0.10:8989` (+ API keys).
+3. **Link the database** — `https://github.com/Dictionarry-Hub/database`, branch **`v2`**, and paste a GitHub **PAT** (avoids the 60/hr rate limit on database refresh).
+4. **Set the delays in Profilarr** (**Delay Profiles** → select **Radarr** / **Sonarr**) so the synced value *is* the value you want — don't edit delays in the arrs directly, or a Sync overwrites them:
+   - Sonarr → **torrent delay `0`**
+   - Radarr → **torrent delay `360`** (6h — Dictionarry's default)
 
-**If you instead want Profilarr to manage a profile** (select it in step 3): after the first sync, prefer individual episodes over season packs by editing its local YAML —
+   v2's change layer keeps these as local overrides — they survive Dictionarry DB updates. Each delay profile also has a **Bypass if above custom-format score** option: grab immediately (skip the delay) when a release scores over a threshold. Optional — handy on Radarr so a genuinely top-tier release doesn't sit through the full 6h wait.
+5. **Per instance → Sync**: tick **only** `2160p Quality`, select the matching delay profile (Radarr/Sonarr — mandatory), then **Sync**. Profilarr is now the single source of truth for both; re-syncing reproduces exactly these values (no drift to manage).
+6. In each arr, assign your library to `2160p Quality` (Sonarr *series editor* / Radarr *movie editor*, bulk).
 
-```bash
-docker exec profilarr sed -i '/^- name: Season Pack$/{n;s/score: 10/score: -10/}' \
-  "/config/db/profiles/1080p Remux.yml"
-```
-
-> **Caveat:** A fresh Dictionarry database pull may overwrite this YAML and reset the score to +10. Re-apply after database updates, or disable auto-pull in Profilarr settings.
+> **Resurrect gotcha:** a Sync pushes **only the profiles you tick**. Tick just the one you want — if you select a profile and later delete it in Sonarr/Radarr, the next Sync re-creates it. Starting from a clean v2 install (nothing selected) is the moment to avoid this permanently.
 
 ### 10.9 Seerr
 
@@ -889,7 +882,7 @@ tailscale ssh <your-username>@<tailscale-hostname>
 
 After `docker compose up -d`, run **`./setup_services.sh`** — it does the wiring
 marked ⚙ below (qBittorrent, Prowlarr apps + FlareSolverr proxy, Radarr/Sonarr
-download client + root folders + settings, Profilarr synced-profiles, AdGuard).
+download client + root folders + settings, AdGuard).
 The rest are first-run wizards / external accounts that stay manual.
 
 1. **AdGuard** — DNS first; ⚙ upstream/rate-limit/blocklists
@@ -900,7 +893,7 @@ The rest are first-run wizards / external accounts that stay manual.
 6. **Radarr/Sonarr** — ⚙ root folders + qBittorrent download client + tracked settings; connect to Jellyfin (manual, 10.6)
 7. **Unpackerr** — no setup; `docker logs unpackerr` should show it watching Sonarr/Radarr
 8. **Bazarr** — connect to Radarr/Sonarr, add subtitle providers (manual)
-9. **Profilarr** — link Dictionarry + connect instances (manual); ⚙ synced-profiles kept empty
+9. **Profilarr** — login, connect instances, link Dictionarry DB (`v2` + PAT), sync `2160p Quality` to both, assign library (manual, UI-only — see 10.8)
 10. **Jellyfin** — create Libraries (Movies → `/media/movies`, TV → `/media/tv`)
 11. **Plex** — claim with `PLEX_CLAIM`, create Libraries pointing at the same `/media/movies` and `/media/tv` (see Part 16.6)
 12. **Seerr** — connect to Jellyfin, Radarr, Sonarr (optionally add Plex too)

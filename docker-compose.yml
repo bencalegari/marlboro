@@ -157,7 +157,12 @@ services:
 
   profilarr:
     container_name: profilarr
-    image: santiagosayshey/profilarr:latest
+    # Upstream moved orgs (santiagosayshey -> Dictionarry-Hub); Docker Hub image
+    # abandoned pre-2.0.9. GHCR publishes semver tags 2.0.0-2.0.9 (2.0.9 == latest;
+    # no rolling 2.0/2/stable tags). Pinned tag@digest: readable version + immutable
+    # digest, per the data-bearing-service pin policy. To bump: pick a newer tag and
+    # re-resolve its digest (docker pulls by digest, tag is informational).
+    image: ghcr.io/dictionarry-hub/profilarr:2.0.9@sha256:7a9b5112ff227320d17c65ab643a5d875713e6235991ef04a8e482ec51427902
     restart: unless-stopped
     networks:
       - homelab

@@ -14,8 +14,6 @@
 #                  services/<app>/settings/*.json (quality profile "Any",
 #                  naming, media management, delay profile)
 #   Prowlarr     — Sonarr/Radarr applications + FlareSolverr indexer proxy
-#   Profilarr    — clears synced profiles (data_to_sync.profiles=[]) so a Sync
-#                  can't resurrect deleted quality profiles
 #   AdGuard      — upstream DNS, rate limit, DNS blocklists (sudo yaml reconcile)
 #   NginxProxyMgr— proxy hosts + Let's Encrypt certs (DNS-01 via DuckDNS) from
 #                  the declarative HOSTS list below
@@ -36,7 +34,6 @@ SONARR=http://localhost:8989
 RADARR=http://localhost:7878
 PROWLARR=http://localhost:9696
 QBIT=http://localhost:8181
-PROFILARR=http://localhost:6868
 NPM=http://localhost:81
 # Container-network coordinates the *arr apps use to reach each other:
 QBIT_HOST=qbittorrent; QBIT_PORT=8080
@@ -50,17 +47,8 @@ SONARR_KEY=$(getenv SONARR_API_KEY)
 RADARR_KEY=$(getenv RADARR_API_KEY)
 QBIT_PW=$(getenv QBIT_PASSWORD)
 
-# Prowlarr key lives in its own config.xml; Profilarr key in its auth table.
+# Prowlarr key lives in its own config.xml.
 PROWLARR_KEY=$(grep -oE '<ApiKey>[^<]+' "$SCRIPT_DIR/services/prowlarr/config/config.xml" 2>/dev/null | sed 's/<ApiKey>//' || true)
-PROFILARR_KEY=$(python3 - "$SCRIPT_DIR/services/profilarr/config/profilarr.db" <<'PY' 2>/dev/null || true
-import sys, sqlite3
-try:
-    c = sqlite3.connect(f'file:{sys.argv[1]}?mode=ro', uri=True)
-    print(c.execute('SELECT api_key FROM auth LIMIT 1').fetchone()[0])
-except Exception:
-    pass
-PY
-)
 
 # up() — is an app reachable? arg1=base url, arg2=header (may be empty)
 up() { curl -fsS -m5 ${2:+-H "$2"} "$1" >/dev/null 2>&1; }
@@ -212,29 +200,11 @@ configure_prowlarr() {
   ensure_prowlarr_app "Sonarr" "http://sonarr:8989" "$SONARR_KEY"
 }
 
-# ─── Profilarr: clear synced profiles ────────────────────────────────────────
-# Keeps a Sync from re-creating quality profiles that were deleted in the *arr
-# apps (this stack runs a single native "Any" profile Profilarr doesn't manage).
-configure_profilarr() {
-  log "Profilarr: clear synced profiles (data_to_sync.profiles=[])"
-  [ -n "$PROFILARR_KEY" ] || { warn "  Profilarr API key not found — skipping"; return; }
-  up "$PROFILARR/api/arr/config" "X-Api-Key: $PROFILARR_KEY" || { warn "  Profilarr unreachable — skipping"; return; }
-  local ids
-  ids=$(curl -fsS -m10 -H "X-Api-Key: $PROFILARR_KEY" "$PROFILARR/api/arr/config" | jq -r '.data[].id')
-  for id in $ids; do
-    local obj; obj=$(curl -fsS -m10 -H "X-Api-Key: $PROFILARR_KEY" "$PROFILARR/api/arr/config/$id")
-    # response nests the object under .data (sometimes .data.data)
-    local inner; inner=$(echo "$obj" | jq 'if .data.data then .data.data else .data end')
-    if echo "$inner" | jq -e '.data_to_sync.profiles | length == 0' >/dev/null 2>&1; then
-      log "  connection $id already has no synced profiles"
-    else
-      local body; body=$(echo "$inner" | jq 'del(.id,.last_sync_time,.sync_percentage,.import_task_id) | .data_to_sync.profiles=[]')
-      curl -fsS -m10 -X PUT -H "X-Api-Key: $PROFILARR_KEY" -H 'Content-Type: application/json' \
-        --data-binary "$body" "$PROFILARR/api/arr/config/$id" >/dev/null \
-        && log "  cleared synced profiles on connection $id" || warn "  failed clearing connection $id"
-    fi
-  done
-}
+# NOTE: Profilarr is intentionally NOT reconciled here. v1 exposed a REST API
+# (/api/arr/config) that this script used to clear synced profiles; Profilarr v2
+# is a SvelteKit app with no such API and an opt-in sync model (nothing syncs
+# unless selected), so the old resurrect-prevention hack is obsolete. Manage
+# profile/CF sync in the Profilarr UI. See README "Profilarr".
 
 # ─── AdGuard: upstream DNS, rate limit, blocklists ───────────────────────────
 # AdGuardHome.yaml is root-owned and AdGuard has no stored API creds here, so we
@@ -373,7 +343,6 @@ configure_qbit
 configure_arr "Sonarr" "$SONARR" "$SONARR_KEY" "tv-sonarr" "/data/media/tv"     "$SCRIPT_DIR/services/sonarr/settings"
 configure_arr "Radarr" "$RADARR" "$RADARR_KEY" "radarr"    "/data/media/movies"  "$SCRIPT_DIR/services/radarr/settings"
 configure_prowlarr
-configure_profilarr
 configure_adguard
 configure_proxy_hosts
 
