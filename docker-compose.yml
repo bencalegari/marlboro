@@ -108,8 +108,7 @@ services:
       - TZ=America/Los_Angeles
     volumes:
       - ./services/radarr/config:/config
-      - /mnt/tank/media/movies:/movies
-      - /mnt/tank/downloads:/downloads
+      - /mnt/tank:/data
     ports:
       - "7878:7878"
 
@@ -129,8 +128,7 @@ services:
       - TZ=America/Los_Angeles
     volumes:
       - ./services/sonarr/config:/config
-      - /mnt/tank/media/tv:/tv
-      - /mnt/tank/downloads:/downloads
+      - /mnt/tank:/data
     ports:
       - "8989:8989"
 
@@ -217,7 +215,7 @@ services:
       - WEBUI_PORT=8080
     volumes:
       - ./services/qbittorrent/config:/config
-      - /mnt/tank/downloads:/downloads
+      - /mnt/tank:/data
     ports:
       - "6881:6881"
       - "6881:6881/udp"
@@ -266,10 +264,11 @@ services:
   # deletes the extracted copies once the queue item clears. No web UI — it's a
   # background worker configured entirely via env (no mounted config file).
   # Reuses the existing Sonarr/Radarr API keys from .env (same ones Glance
-  # uses), so no new credentials are needed. The /downloads mount MUST match
-  # the path Sonarr/Radarr use (/mnt/tank/downloads:/downloads) or Unpackerr
-  # can't find the files the queue references. Runs as 1000:1000 (like Flood)
-  # so extracted files are owned consistently and the *arr can import them.
+  # uses), so no new credentials are needed. The mount MUST match the path
+  # Sonarr/Radarr use — all three share the single /mnt/tank:/data mount and
+  # reference /data/downloads, so Unpackerr can find the files the queue
+  # references. Runs as 1000:1000 (like Flood) so extracted files are owned
+  # consistently and the *arr can import them.
 
   unpackerr:
     container_name: unpackerr
@@ -282,12 +281,12 @@ services:
       - TZ=America/Los_Angeles
       - UN_SONARR_0_URL=http://sonarr:8989
       - UN_SONARR_0_API_KEY=${SONARR_API_KEY}
-      - UN_SONARR_0_PATHS_0=/downloads
+      - UN_SONARR_0_PATHS_0=/data/downloads
       - UN_RADARR_0_URL=http://radarr:7878
       - UN_RADARR_0_API_KEY=${RADARR_API_KEY}
-      - UN_RADARR_0_PATHS_0=/downloads
+      - UN_RADARR_0_PATHS_0=/data/downloads
     volumes:
-      - /mnt/tank/downloads:/downloads
+      - /mnt/tank:/data
     depends_on:
       - sonarr
       - radarr

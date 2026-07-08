@@ -607,8 +607,8 @@ op item edit "Marlboro NAS - qBittorrent" password=your-new-password
 ```
 
 Downloads: **Tools → Options → Downloads**
-- Default Save Path: `/downloads/complete`
-- Incomplete: `/downloads/incomplete`
+- Default Save Path: `/data/downloads/complete`
+- Incomplete: `/data/downloads/incomplete`
 
 > `setup_script.sh` already seeds the WebUI username/password into `qBittorrent.conf`
 > from 1Password, so the temp-password/permanent-password dance above is only
@@ -616,6 +616,35 @@ Downloads: **Tools → Options → Downloads**
 > "Marlboro NAS - qBittorrent" password=...`, re-run `setup_script.sh` to reseed
 > the conf, then `docker compose up -d --force-recreate flood` so Flood picks up
 > the new value from `.env`.
+
+**Seeding / share limits (auto-remove completed torrents):**
+
+To adhere to the tracker's seeding rules — *seed to a 1:1 ratio, or for 336 hours,
+whichever comes first* — global share limits are set in **Tools → Options →
+BitTorrent → Seeding Limits** (or via the Web API `setPreferences`):
+
+- **When ratio reaches `1.0`** ✔  (`max_ratio_enabled=true`, `max_ratio=1`)
+- **When seeding time reaches `20160` min (336 h)** ✔  (`max_seeding_time_enabled=true`, `max_seeding_time=20160`)
+- Action: **Remove torrent and delete files** (`max_ratio_act=2`)
+
+qBittorrent triggers on whichever limit is hit first. `max_seeding_time` is in
+**minutes**. Deleting files is safe for the media library because imports are
+**hardlinks** (see storage note below): the seeding file in `/data/downloads` and
+the library file in `/data/media` are two names for the **same inode**. Removing the
+torrent's copy just unlinks one name — the library name (and the data) remain.
+
+> **Storage — single mount + hardlinks:** qBittorrent, Sonarr, Radarr and Unpackerr
+> all share **one** bind mount `/mnt/tank:/data` (paths `/data/downloads`,
+> `/data/media/tv`, `/data/media/movies`). Because downloads and library sit under a
+> single mount, Sonarr/Radarr **hardlink** on import (`copyUsingHardlinks=true`)
+> instead of copying, so an imported file is **not** stored twice. Requirement: the
+> `*arr` root folders must be under `/data/media` and the download client path under
+> `/data/downloads` — if any service is mounted so downloads and library land on
+> different mount points, `link()` fails `EXDEV` and it silently falls back to copy.
+> (Flood keeps its own `/downloads` mount — it's only a UI and does no imports.)
+
+These limits live in `qBittorrent.conf` (app-mutated, gitignored) — this section is
+the source of truth for the intended values.
 
 **Flood (torrent web UI):**
 
