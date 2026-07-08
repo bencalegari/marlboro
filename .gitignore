@@ -19,6 +19,16 @@ services/glance/*
 services/glance/config/*
 !services/glance/config/glance.yml
 
+# Exception: declarative *arr settings we export + author (quality profile, naming,
+# media management, delay profile). NOT the runtime DB/config.xml (those stay ignored).
+!services/sonarr/
+services/sonarr/*
+!services/sonarr/settings/
+
+!services/radarr/
+services/radarr/*
+!services/radarr/settings/
+
 # Media & downloads
 media/
 downloads/

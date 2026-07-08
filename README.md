@@ -688,20 +688,33 @@ Repeat in Sonarr.
 
 ### 10.8 Profilarr
 
+Profilarr git-syncs quality profiles + custom formats from the Dictionarry database into Sonarr/Radarr. **This stack now runs a single self-managed `Any` profile** in both apps (all qualities enabled, upgrades on, cutoff `Bluray-2160p` so it auto-climbs to the best available quality incl. 4K without chasing Remux). Because `Any` is a native profile Profilarr does not manage, **Profilarr is deliberately configured to push _no_ profiles** — it stays connected for the upstream database only.
+
 1. **Settings → Databases**: add `https://github.com/Dictionarry-Hub/dictionarry`
 2. Add Radarr and Sonarr instances
-3. Select quality profiles:
-   - Radarr: **2160p Remux** (LG C1 4K display)
-   - Sonarr: **1080p Remux**
-4. Set sync to **Auto**, trigger manual sync immediately
-5. **After first sync**, edit Profilarr's local profile YAML to prefer individual episode downloads over season packs:
+3. **Synced profiles: none** — leave each instance's profile selection empty so Profilarr doesn't create or overwrite profiles in the *arr apps.
 
-   ```bash
-   docker exec profilarr sed -i '/^- name: Season Pack$/{n;s/score: 10/score: -10/}' \
-     "/config/db/profiles/1080p Remux.yml"
-   ```
+> **Gotcha — deleted profiles resurrect on Sync:** Profilarr stores its per-instance profile list in `arr_config.data_to_sync.profiles`. If you delete or rename a quality profile in Sonarr/Radarr, you **must also clear it from Profilarr**, or the next Sync re-creates the deleted profile. (Profilarr never touches the native `Any` profile, so manual `Any` edits are safe.)
+>
+> **Clear synced profiles — UI:** edit each arr connection and empty its selected-profiles list.
+>
+> **Clear synced profiles — API** (auth via the `api_key` in Profilarr's `auth` table — `docker exec profilarr` + query `/config/db/profilarr.db`, header `X-Api-Key`):
+> ```bash
+> # List connections + ids
+> curl -s http://localhost:6868/api/arr/config -H "X-Api-Key: $PROFILARR_KEY"
+> # For each id, PUT the connection back with data_to_sync.profiles = []
+> #   GET  /api/arr/config/<id>   -> take the returned object
+> #   PUT  /api/arr/config/<id>   -> same object, profiles set to []
+> ```
 
-   > **Caveat:** If Profilarr pulls a fresh copy of the Dictionarry database, this YAML may be overwritten and the score reset to +10. Re-apply after database updates, or disable auto-pull in Profilarr settings.
+**If you instead want Profilarr to manage a profile** (select it in step 3): after the first sync, prefer individual episodes over season packs by editing its local YAML —
+
+```bash
+docker exec profilarr sed -i '/^- name: Season Pack$/{n;s/score: 10/score: -10/}' \
+  "/config/db/profiles/1080p Remux.yml"
+```
+
+> **Caveat:** A fresh Dictionarry database pull may overwrite this YAML and reset the score to +10. Re-apply after database updates, or disable auto-pull in Profilarr settings.
 
 ### 10.9 Seerr
 
