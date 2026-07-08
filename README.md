@@ -7,7 +7,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 - **Jellyfin** — Media server with Intel QuickSync hardware transcoding
 - **Plex** — Second media server (existing plex.tv account) with QuickSync transcoding
 - **AdGuard Home** — Network-wide DNS ad blocking
-- **Sunshine** — Game streaming host (Moonlight client)
+- **Sunshine** — Game streaming host for Moonlight clients
 - **Steam** — Light gaming on the Mac Mini
 - **RetroArch** — Retro game emulation
 - **Prowlarr** — Indexer manager
@@ -121,7 +121,7 @@ op item get "Marlboro NAS - Network" --vault Private
 - **Pin the tag** so Watchtower only patches within a safe line: `jellyfin:10.11`, `mariadb:12` (romm-db), `rommapp/romm:4`, `jc21/nginx-proxy-manager:2`, `codeberg.org/forgejo/forgejo:11`, `postgres:15-alpine`/`14-…` (coolify-db, immich-postgres). Bump these deliberately after reading release notes; **back up the DB first** for anything stateful.
 - **Fence with `com.centurylinklabs.watchtower.enable=false`** where there's no clean version tag or the app self-updates: Immich (`immich-server`/`immich-machine-learning`/`immich-postgres`, upgraded by hand in lockstep) and Coolify (`coolify`/`coolify-realtime`, update via Coolify's own UI).
 
-**Sunshine runs as an AppImage** with Sway as the Wayland compositor. Managed via `systemctl --user`.
+**Sunshine runs as the native Ubuntu `.deb`** (not Docker), started by `systemctl --user` inside a **sway** (wlroots) session, capturing the connected display with `capture=kms`. Sway is required: GNOME/Mutter Wayland is uncapturable (empty KMS monitor list, no `wlr-screencopy`) and questing ships no GNOME-on-Xorg session, so `capture=x11` is a dead end. It streams **H.264 only** — this Mac Mini's Intel UHD 630 can decode HEVC but has no HEVC/AV1 *encode* entrypoint (same hardware limit as the Jellyfin note). The whole host is provisioned idempotently by `setup_script.sh` (its `configure_sunshine` step, Part 5/7) — including seeding the web-UI login from 1Password; only Moonlight pairing is manual (Part 7).
 
 **Scrutiny monitors all 4 drives** (`/dev/sda`–`/dev/sdd`) via device passthrough. Its **Status Threshold is set to "Smart" (not "Both")** — Scrutiny's observed-failure-rate heuristic produces false positives on these Seagate ST8000DM004 drives (e.g. it fails `Spin_Up_Time` for an "observed failure rate >10%" even though the attribute's raw value is 0 and the drive's own SMART self-assessment passes). Smart-only makes the dashboard badge follow the drive's actual SMART verdict. This setting lives in the app-managed `scrutiny.db` (not tracked in git), so **re-apply it after a fresh setup** via Settings → "Metric Status Threshold" → *Smart*, or the API:
 
@@ -359,7 +359,9 @@ cd ~/marlboro
 ./setup_script.sh
 ```
 
-Generates credentials, stores everything in 1Password tagged `marlboro-nas`, pulls all values, and writes `~/marlboro/.env`. Re-run anytime to sync credentials from 1Password.
+Generates credentials, stores everything in 1Password tagged `marlboro-nas`, pulls all values, and writes `~/marlboro/.env`. It also does the host-level, non-container setup for this pre-compose phase: media dirs + ownership, the docker wait-for-tank drop-in, and **provisioning the Sunshine stream host** (`configure_sunshine` — sway autologin + KMS capture; see Part 7). Re-run anytime to sync credentials + converge host state.
+
+> If this is a first run, the Sunshine step may print **`REBOOT REQUIRED`** (it added you to the `input` group / switched the login session to sway). Reboot before continuing, then come back for `docker compose up -d`.
 
 To start the stack:
 
@@ -403,109 +405,91 @@ If any 1Password item is missing, `setup_script.sh` prints a warning and that wi
 
 ## Part 7: Install Sunshine (on host, not Docker)
 
-### 7.1 Install Sway and Sunshine AppImage
+Sunshine streams the connected display (`DP-3`, a 4K ASUS) to Moonlight clients under a
+**sway** (wlroots) session, using **KMS capture** + Intel VAAPI. The GPU (UHD 630)
+encodes **H.264 only** (no HEVC/AV1 encode), so streams are H.264.
+
+> **Why sway, not GNOME/Xorg?** GNOME/Mutter Wayland can't be KMS-captured — the KMS
+> monitor list comes back empty (Mutter holds DRM master) and GNOME doesn't implement
+> `wlr-screencopy`. Ubuntu questing also ships **no GNOME-on-Xorg** session, so
+> `capture=x11` is a dead end here. sway (wlroots) exposes the framebuffer to KMS
+> capture and is the working path.
+
+**The host is provisioned by `setup_script.sh` (Part 5)** — its `configure_sunshine`
+step, run in the same pre-compose phase (see the repo's scripting-over-docs rule).
+It's idempotent and does everything scriptable: installs the pinned `.deb` +
+`sway`/`swayidle`/`retroarch`, sets GDM to autologin the sway session, adds you to the
+`input` group (uinput = virtual gamepad/keyboard/mouse), writes the sway config +
+`sway-session.target` (which launches Sunshine — `graphical-session.target` refuses
+manual start), the shared-monitor power scripts (7.6), `sunshine.conf` (`capture=kms`,
+`encoder=vaapi`, auto-detected `csrf_allowed_origins`), a starter `apps.json`, and seeds
+the web-UI login from the `Marlboro NAS - Sunshine` 1Password item (7.3). Only Moonlight
+pairing is manual.
+
+### 7.1 Provision + reboot
+
+Already done by `./setup_script.sh` in Part 5 — there's no separate Sunshine command.
+If that run added you to `input` or switched the session to sway, it prints
+`REBOOT REQUIRED`; apply it before the wizard:
 
 ```bash
-sudo apt install sway
-wget https://github.com/LizardByte/Sunshine/releases/latest/download/sunshine.AppImage
-chmod +x ~/sunshine.AppImage
-sudo setcap cap_sys_admin+p ~/sunshine.AppImage
+sudo reboot              # applies the sway autologin session + the 'input' group
 ```
 
-### 7.2 Create Sway Service
+### 7.2 Verify after reboot
 
 ```bash
-vim ~/.config/systemd/user/weston.service
+systemctl --user is-active app-dev.lizardbyte.app.Sunshine.service swayidle.service   # -> active / active
+journalctl --user -u app-dev.lizardbyte.app.Sunshine.service -b | grep -E 'Screencasting with KMS|Found H.264'
 ```
 
-```ini
-[Unit]
-Description=Sway Wayland Compositor
-Before=sunshine.service
+### 7.3 Web-UI login (seeded from 1Password)
 
-[Service]
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=WLR_BACKENDS=headless
-Environment=WLR_RENDERER=pixman
-Environment=WLR_LIBINPUT_NO_DEVICES=1
-ExecStart=/usr/bin/sway
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
+The login is **seeded from the `Marlboro NAS - Sunshine` 1Password item** by
+`setup_script.sh` on first run — it runs `sunshine --creds`, which hashes the password
+itself (the scheme is internal/version-specific, so we don't reproduce it) and merges,
+preserving Moonlight pairings. So create that item with your desired username/password
+*before* Part 5 (**upsert** — don't blind-`create`; duplicate titles break credential
+pulls, which bit this setup once):
 
 ```bash
-systemctl --user enable weston
-systemctl --user start weston
+op item get "Marlboro NAS - Sunshine" --vault Private &>/dev/null \
+  || op item create --category Login --title "Marlboro NAS - Sunshine" \
+       --vault Private --tags marlboro-nas \
+       --url "https://$(tailscale ip -4 | head -1):47990" \
+       username=admin password=your-chosen-password
 ```
 
-### 7.3 Create Sunshine Service
+Then open `https://<tailscale-ip>:47990` (accept the self-signed cert) and log in with
+those creds. The browser Origin must be in `csrf_allowed_origins` or login fails with a
+CSRF error — the script auto-adds every LAN + tailscale IP (`:47990`); add others to
+`sunshine.conf` if you reach it by a hostname/other IP.
 
-```bash
-vim ~/.config/systemd/user/sunshine.service
-```
+> Seeding is **first-run only** (skipped once creds exist, so re-runs don't reset the
+> salt or bounce the service). To rotate the password: update the 1Password item, delete
+> the top-level `username`/`salt`/`password` from `~/.config/sunshine/sunshine_state.json`
+> (keep `root` to preserve pairings), and re-run `setup_script.sh` — or just change it in
+> the web UI.
 
-```ini
-[Unit]
-Description=Sunshine Game Streaming Server
-After=weston.service
-Requires=weston.service
+### 7.4 Pair a Moonlight client
 
-[Service]
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=WAYLAND_DISPLAY=wayland-1
-ExecStart=/home/<your-username>/sunshine.AppImage
-Restart=on-failure
+Preferred path is **Tailscale** — `marlboro` and your client devices
+(`bcalegari-mac`, `bcalegari-iphone`, `bcalegari-pc`) are already on the tailnet, so no
+port forwarding is needed.
 
-[Install]
-WantedBy=default.target
-```
+1. In Moonlight, add the host by its Tailscale IP (`tailscale ip -4` on the server).
+2. Moonlight shows a PIN → enter it in the Sunshine web UI **PIN** page.
+3. In Moonlight's stream settings, set the codec to **H.264** (this GPU can't encode HEVC).
 
-```bash
-systemctl --user daemon-reload
-systemctl --user enable sunshine
-systemctl --user start sunshine
-```
+Apps `Desktop`, `Steam Big Picture`, and `RetroArch` are seeded in `apps.json` (RetroArch
+uses `cmd`+`auto-detach:false`, so it **quits when the stream ends**); add/edit more in
+the web UI (**Applications**).
 
-### 7.4 Configure Sunshine
+### 7.5 Remote streaming without Tailscale (optional)
 
-```bash
-mkdir -p ~/.config/sunshine
-vim ~/.config/sunshine/sunshine.conf
-```
-
-```
-adapter_name = /dev/dri/renderD128
-```
-
-### 7.5 First Launch
-
-Access `https://<server-ip>:47990` (accept the self-signed cert warning). Set a password and store it:
-
-```bash
-op item create \
-  --category Login \
-  --title "Marlboro NAS - Sunshine" \
-  --vault Private \
-  --tags marlboro-nas \
-  --url https://<server-ip>:47990 \
-  username=admin \
-  password=your-chosen-password
-```
-
-### 7.6 Add Steam and RetroArch Apps
-
-In Sunshine web UI → **Applications → Add**:
-
-| Name | Command |
-|---|---|
-| Steam | `steam -gamepadui` |
-| RetroArch | `retroarch` |
-
-### 7.7 Port Forwarding (for remote streaming)
-
-Forward to `<server-ip>` on your TP-Link BE3600 (**Advanced → NAT Forwarding → Virtual Servers**):
+Only if a client isn't on the tailnet: forward these to `<server-ip>` on the TP-Link
+BE3600 (**Advanced → NAT Forwarding → Virtual Servers**). If `ufw` is active, also
+`sudo ufw allow` them.
 
 | Port | Protocol | Service |
 |---|---|---|
@@ -514,6 +498,23 @@ Forward to `<server-ip>` on your TP-Link BE3600 (**Advanced → NAT Forwarding �
 | 47990 | TCP | Sunshine web UI |
 | 47998–48000 | UDP | Moonlight streaming |
 | 48010 | UDP | Moonlight streaming |
+
+### 7.6 Shared-monitor sleep (scripted)
+
+The `DP-3` display is shared with other machines, so it must sleep when the Mac is idle —
+but KMS capture needs a **lit** connector during a stream. `setup_script.sh`
+(`configure_sunshine`) wires both sides automatically:
+
+- `swayidle.service` blanks the output after `IDLE_TIMEOUT` (default 300s) idle via
+  `~/.config/sunshine/display.sh` (`swaymsg 'output * power off'`).
+- Sunshine's `global_prep_cmd` runs `display.sh stream-start` on stream start (force the
+  output on + pause the blanker) and `display.sh stream-end` on stream end (re-arm the
+  blanker → sleeps again if idle).
+
+Net: idle → monitor sleeps; streaming → forced on and won't blank; local input → wakes and
+stays on. Change the timeout via `IDLE_TIMEOUT` in the script (then re-run it) or edit
+`~/.config/systemd/user/swayidle.service`. (This replaces the old X11-capture "black screen
+when the monitor sleeps" EDID workaround — KMS + wake-on-stream doesn't have that failure.)
 
 ---
 
