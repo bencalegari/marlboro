@@ -172,12 +172,16 @@ chmod 600 "$ENV_FILE"
 
 log ".env written with $(grep -c '=' "$ENV_FILE") variables"
 
-# ─── Seed qBittorrent WebUI Credentials ──────────────────────────────────────
+# ─── Seed qBittorrent WebUI Credentials + HostHeaderValidation ───────────────
 # qBittorrent stores its WebUI password as a PBKDF2-HMAC-SHA512 hash inside
 # qBittorrent.conf and accepts no plaintext-password env var. We compute the
 # hash from the 1Password value and write it directly, so the container never
 # needs the temporary-password dance. Flood logs in with this same plaintext
 # value (via FLOOD_OPTION_qbpass in .env), so the two are kept in sync here.
+# We also force WebUI\HostHeaderValidation=false in the same pass — it must be
+# set before first start or the API/WebUI rejects requests and the post-setup
+# reconcile (setup_services.sh) can't reach qBittorrent. Runtime settings (save
+# paths, share limits) are handled post-compose by setup_services.sh.
 
 QBIT_CONF="$SCRIPT_DIR/services/qbittorrent/config/qBittorrent/qBittorrent.conf"
 QBIT_PW=$(pull_field "Marlboro NAS - qBittorrent" password)
@@ -210,12 +214,16 @@ except FileNotFoundError:
 
 pw_idx = next((i for i, l in enumerate(lines) if l.startswith('WebUI\\Password_PBKDF2=')), None)
 user_idx = next((i for i, l in enumerate(lines) if l.startswith('WebUI\\Username=')), None)
+# HostHeaderValidation must be false or the WebUI/API rejects requests whose
+# Host header isn't whitelisted — which blocks setup_services.sh on a fresh box.
+hhv_idx = next((i for i, l in enumerate(lines) if l.startswith('WebUI\\HostHeaderValidation=')), None)
 prefs_idx = next((i for i, l in enumerate(lines) if l.strip() == '[Preferences]'), None)
 
 pw_ok = pw_idx is not None and verify(password, lines[pw_idx])
 user_ok = user_idx is not None and lines[user_idx] == 'WebUI\\Username=admin'
+hhv_ok = hhv_idx is not None and lines[hhv_idx] == 'WebUI\\HostHeaderValidation=false'
 
-if pw_ok and user_ok:
+if pw_ok and user_ok and hhv_ok:
     print('unchanged')
     sys.exit(0)
 
@@ -236,6 +244,11 @@ if user_idx is not None:
     lines[user_idx] = 'WebUI\\Username=admin'
 else:
     lines.insert(prefs_idx + 1, 'WebUI\\Username=admin')
+
+if hhv_idx is not None:
+    lines[hhv_idx] = 'WebUI\\HostHeaderValidation=false'
+else:
+    lines.insert(prefs_idx + 1, 'WebUI\\HostHeaderValidation=false')
 
 os.makedirs(os.path.dirname(conf_path), exist_ok=True)
 with open(conf_path, 'w') as f:

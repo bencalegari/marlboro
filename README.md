@@ -367,6 +367,20 @@ To start the stack:
 docker compose up -d
 ```
 
+Then reconcile all in-app settings from the repo — one idempotent script (safe
+to re-run; it converges and never clobbers manual edits):
+
+```bash
+./setup_services.sh    # qBit, Sonarr/Radarr, Prowlarr, Profilarr, AdGuard, NPM proxy hosts + certs
+```
+
+Run it once the containers are up. It configures everything that has an
+API/config surface (see Part 10 + Part 19); the handful of steps that require a
+first-run wizard or an external account stay manual and are called out below.
+Re-run it any time you change a tracked setting (e.g. edit
+`services/<app>/settings/*.json`, or the `NPM_HOSTS` list in the script) to push
+it back.
+
 ---
 
 ## Part 6: Glance Configuration
@@ -573,9 +587,16 @@ On TP-Link BE3600: **Advanced → Network → DHCP Server → Primary DNS** → 
 
 ### 9.5 Recommended AdGuard Settings
 
-- **Settings → DNS settings → Upstream DNS:** add `https://dns.cloudflare.com/dns-query`
-- **Settings → DNS settings → Rate limit:** set to 300 or 0
-- **Filters → DNS blocklists:** add EasyList, EasyPrivacy, Steven Black's Hosts
+Applied by `setup_services.sh` (reconciles `AdGuardHome.yaml` via sudo, then
+restarts AdGuard — idempotent). It ensures:
+
+- Upstream DNS includes `https://dns.cloudflare.com/dns-query`
+- Rate limit `300`
+- DNS blocklists: EasyList, EasyPrivacy, Steven Black's Hosts
+
+The yaml is root-owned and AdGuard has no stored API creds here, so this step
+needs passwordless sudo; without it, `setup_services.sh` prints these three
+settings to apply by hand in **Settings → DNS settings** / **Filters**.
 
 ---
 
@@ -583,55 +604,28 @@ On TP-Link BE3600: **Advanced → Network → DHCP Server → Primary DNS** → 
 
 ### 10.1 qBittorrent
 
-Get temp password:
+**Scripted.** WebUI credentials + `WebUI\HostHeaderValidation=false` are seeded
+into `qBittorrent.conf` by `setup_script.sh` (pre-compose, from 1Password) — no
+temp-password dance. Runtime prefs are applied by `setup_services.sh`
+(post-compose): save path `/data/downloads/complete`, incomplete
+`/data/downloads/incomplete`, and the seeding share limits below. WebUI at
+`http://<server-ip>:8181`.
 
-```bash
-docker logs qbittorrent | grep -i password
-```
+> **Changing the password:** `op item edit "Marlboro NAS - qBittorrent"
+> password=...`, re-run `setup_script.sh` to reseed the conf, then
+> `docker compose up -d --force-recreate flood` so Flood picks up the new value.
 
-Log in at `http://<server-ip>:8181`. If you see a plain "Unauthorized" page:
+**Seeding / share limits (auto-remove completed torrents)** — applied by
+`setup_services.sh` to match the tracker rule *seed to ratio 1:1 or 336 h,
+whichever first*:
 
-```bash
-docker compose stop qbittorrent
-vim ~/marlboro/services/qbittorrent/config/qBittorrent/qBittorrent.conf
-# Add under [Preferences]:
-# WebUI\HostHeaderValidation=false
-# WebUI\Port=8080
-docker compose up -d qbittorrent
-```
+- ratio `1.0` (`max_ratio=1`) and seed time `20160` min / 336 h (`max_seeding_time=20160`)
+- action **remove torrent + delete files** (`max_ratio_act=2`); triggers on whichever hits first
 
-Set permanent password in **Tools → Options → Web UI**, then:
-
-```bash
-op item edit "Marlboro NAS - qBittorrent" password=your-new-password
-```
-
-Downloads: **Tools → Options → Downloads**
-- Default Save Path: `/data/downloads/complete`
-- Incomplete: `/data/downloads/incomplete`
-
-> `setup_script.sh` already seeds the WebUI username/password into `qBittorrent.conf`
-> from 1Password, so the temp-password/permanent-password dance above is only
-> needed if you change the password manually. If you do, run `op item edit
-> "Marlboro NAS - qBittorrent" password=...`, re-run `setup_script.sh` to reseed
-> the conf, then `docker compose up -d --force-recreate flood` so Flood picks up
-> the new value from `.env`.
-
-**Seeding / share limits (auto-remove completed torrents):**
-
-To adhere to the tracker's seeding rules — *seed to a 1:1 ratio, or for 336 hours,
-whichever comes first* — global share limits are set in **Tools → Options →
-BitTorrent → Seeding Limits** (or via the Web API `setPreferences`):
-
-- **When ratio reaches `1.0`** ✔  (`max_ratio_enabled=true`, `max_ratio=1`)
-- **When seeding time reaches `20160` min (336 h)** ✔  (`max_seeding_time_enabled=true`, `max_seeding_time=20160`)
-- Action: **Remove torrent and delete files** (`max_ratio_act=2`)
-
-qBittorrent triggers on whichever limit is hit first. `max_seeding_time` is in
-**minutes**. Deleting files is safe for the media library because imports are
-**hardlinks** (see storage note below): the seeding file in `/data/downloads` and
-the library file in `/data/media` are two names for the **same inode**. Removing the
-torrent's copy just unlinks one name — the library name (and the data) remain.
+Deleting files is safe because imports are **hardlinks** (storage note below):
+the seeding file in `/data/downloads` and the library file in `/data/media` are
+two names for the **same inode** — removing the torrent's copy just unlinks one
+name; the library name (and data) remain.
 
 > **Storage — single mount + hardlinks:** qBittorrent, Sonarr, Radarr and Unpackerr
 > all share **one** bind mount `/mnt/tank:/data` (paths `/data/downloads`,
@@ -642,9 +636,6 @@ torrent's copy just unlinks one name — the library name (and the data) remain.
 > `/data/downloads` — if any service is mounted so downloads and library land on
 > different mount points, `link()` fails `EXDEV` and it silently falls back to copy.
 > (Flood keeps its own `/downloads` mount — it's only a UI and does no imports.)
-
-These limits live in `qBittorrent.conf` (app-mutated, gitignored) — this section is
-the source of truth for the intended values.
 
 **Flood (torrent web UI):**
 
@@ -667,38 +658,26 @@ sed -i '/^WebUI\\AlternativeUIEnabled=/d; /^WebUI\\RootFolder=/d' \
 docker compose up -d qbittorrent flood
 ```
 
-### 10.2 Flaresolverr → Prowlarr
+### 10.2 Prowlarr, download clients, root folders (scripted)
 
-1. Prowlarr → **Settings → Indexer Proxies → Add → FlareSolverr**
-2. Host: `http://flaresolverr:8191`
-3. Add tag e.g. `flare`, enable and save
-4. Assign same `flare` tag to Cloudflare-protected indexers
+`setup_services.sh` reconciles all of this idempotently:
 
-### 10.3 Prowlarr → Radarr/Sonarr
+- **Prowlarr:** FlareSolverr indexer proxy (`http://flaresolverr:8191`) + the
+  Radarr and Sonarr applications.
+- **Radarr/Sonarr:** the qBittorrent download client (host `qbittorrent`, port
+  `8080`, categories `radarr` / `tv-sonarr`) and the root folders
+  (`/data/media/movies`, `/data/media/tv`).
+- **Radarr/Sonarr settings:** applies the tracked `services/<app>/settings/*.json`
+  — quality profile `Any`, naming, media management (`copyUsingHardlinks=true`),
+  delay profile.
 
-1. Add indexers in Prowlarr
-2. **Settings → Apps → Add → Radarr**: `http://radarr:7878`, API key from Radarr → Settings → General
-3. Repeat for Sonarr: `http://sonarr:8989`
+Media directories + ownership are created by `setup_script.sh`. To fix ownership
+manually: `docker run --rm -v /mnt/tank:/mnt/tank alpine chown 1000:1000
+/mnt/tank/media/movies /mnt/tank/media/tv /mnt/tank/downloads/{complete,incomplete}`.
 
-### 10.4 Radarr/Sonarr → qBittorrent
-
-Radarr: **Settings → Download Clients → Add → qBittorrent**
-- Host: `qbittorrent`, Port: `8080`, Category: `radarr`
-
-Sonarr: same, category `sonarr`.
-
-### 10.5 Root Folders
-
-Media directories and ownership are created automatically by `setup_script.sh`. If you need to fix them manually:
-
-```bash
-docker run --rm -v /mnt/tank:/mnt/tank alpine chown 1000:1000 \
-  /mnt/tank/media/movies /mnt/tank/media/tv \
-  /mnt/tank/downloads/complete /mnt/tank/downloads/incomplete
-```
-
-- Radarr: **Settings → Media Management → Root Folders** → `/movies`
-- Sonarr: **Settings → Media Management → Root Folders** → `/tv`
+**Still manual** (you choose these): add indexers in Prowlarr, then — for any
+Cloudflare-protected ones — create a tag (e.g. `flare`) on the FlareSolverr proxy
+and assign the same tag to those indexers.
 
 ### 10.6 Radarr/Sonarr → Jellyfin
 
@@ -719,22 +698,23 @@ Repeat in Sonarr.
 
 Profilarr git-syncs quality profiles + custom formats from the Dictionarry database into Sonarr/Radarr. **This stack now runs a single self-managed `Any` profile** in both apps (all qualities enabled, upgrades on, cutoff `Bluray-2160p` so it auto-climbs to the best available quality incl. 4K without chasing Remux). Because `Any` is a native profile Profilarr does not manage, **Profilarr is deliberately configured to push _no_ profiles** — it stays connected for the upstream database only.
 
+**Manual** (first-run, in the Profilarr UI):
+
 1. **Settings → Databases**: add `https://github.com/Dictionarry-Hub/dictionarry`
 2. Add Radarr and Sonarr instances
-3. **Synced profiles: none** — leave each instance's profile selection empty so Profilarr doesn't create or overwrite profiles in the *arr apps.
 
-> **Gotcha — deleted profiles resurrect on Sync:** Profilarr stores its per-instance profile list in `arr_config.data_to_sync.profiles`. If you delete or rename a quality profile in Sonarr/Radarr, you **must also clear it from Profilarr**, or the next Sync re-creates the deleted profile. (Profilarr never touches the native `Any` profile, so manual `Any` edits are safe.)
->
-> **Clear synced profiles — UI:** edit each arr connection and empty its selected-profiles list.
->
-> **Clear synced profiles — API** (auth via the `api_key` in Profilarr's `auth` table — `docker exec profilarr` + query `/config/db/profilarr.db`, header `X-Api-Key`):
-> ```bash
-> # List connections + ids
-> curl -s http://localhost:6868/api/arr/config -H "X-Api-Key: $PROFILARR_KEY"
-> # For each id, PUT the connection back with data_to_sync.profiles = []
-> #   GET  /api/arr/config/<id>   -> take the returned object
-> #   PUT  /api/arr/config/<id>   -> same object, profiles set to []
-> ```
+**Scripted:** `setup_services.sh` clears each instance's synced-profile list
+(`arr_config.data_to_sync.profiles=[]`) so Profilarr pushes no profiles — run it
+after adding the instances, and any time you add/delete a quality profile.
+
+> **Why:** Profilarr stores its per-instance profile list in
+> `arr_config.data_to_sync.profiles`. If you delete or rename a quality profile in
+> Sonarr/Radarr but leave it selected in Profilarr, the next Sync **re-creates the
+> deleted profile**. (Profilarr never touches the native `Any` profile, so manual
+> `Any` edits are safe.) `setup_services.sh` keeps the list empty; to do it by hand,
+> edit each arr connection in the UI and clear its selected profiles. The script
+> authenticates with the `api_key` from Profilarr's `auth` table in
+> `services/profilarr/config/profilarr.db` (header `X-Api-Key`).
 
 **If you instead want Profilarr to manage a profile** (select it in step 3): after the first sync, prefer individual episodes over season packs by editing its local YAML —
 
@@ -759,7 +739,7 @@ Sonarr and Radarr **detect** scene-style multi-part `.rar`/`.zip` releases but n
 
 There is **nothing to configure in a web UI** — Unpackerr has none. It's wired entirely through `docker-compose.yml` and reuses the existing Sonarr/Radarr API keys from `.env` (the same `SONARR_API_KEY`/`RADARR_API_KEY` that Glance uses), so no new credentials and no setup-script changes are needed:
 
-- It mounts `/mnt/tank/downloads:/downloads` — **the same path Radarr/Sonarr use.** This is the one hard requirement: Unpackerr matches the queue item's download path against this mount, so if it ever drifts from the *arr mount, extraction silently does nothing.
+- It shares the single `/mnt/tank:/data` mount and watches `/data/downloads` (`UN_*_PATHS_0`) — **the same path Radarr/Sonarr use.** This is the one hard requirement: Unpackerr matches the queue item's download path against this mount, so if it ever drifts from the *arr mount, extraction silently does nothing.
 - It runs as `1000:1000` so extracted files are owned consistently and the *arr can import them.
 
 Start it and confirm it connected to both apps:
@@ -907,15 +887,20 @@ tailscale ssh <your-username>@<tailscale-hostname>
 
 ## Part 16: Recommended Service Startup Order
 
-1. **AdGuard** — DNS first
-2. **qBittorrent** — change default password
+After `docker compose up -d`, run **`./setup_services.sh`** — it does the wiring
+marked ⚙ below (qBittorrent, Prowlarr apps + FlareSolverr proxy, Radarr/Sonarr
+download client + root folders + settings, Profilarr synced-profiles, AdGuard).
+The rest are first-run wizards / external accounts that stay manual.
+
+1. **AdGuard** — DNS first; ⚙ upstream/rate-limit/blocklists
+2. **qBittorrent** — ⚙ creds seeded pre-compose, save paths + share limits post-compose
 3. **Flood** — browse to `:3004`, confirm it shows qBittorrent's torrents
-4. **Flaresolverr** — register in Prowlarr, add `flare` tag
-5. **Prowlarr** — add indexers, connect to Radarr/Sonarr
-6. **Radarr/Sonarr** — root folders, connect to qBittorrent and Jellyfin
+4. **Flaresolverr** — ⚙ registered as a Prowlarr proxy; assign `flare` tag to CF indexers (manual)
+5. **Prowlarr** — ⚙ Radarr/Sonarr apps linked; add indexers (manual)
+6. **Radarr/Sonarr** — ⚙ root folders + qBittorrent download client + tracked settings; connect to Jellyfin (manual, 10.6)
 7. **Unpackerr** — no setup; `docker logs unpackerr` should show it watching Sonarr/Radarr
-8. **Bazarr** — connect to Radarr/Sonarr, add subtitle providers
-9. **Profilarr** — link Dictionarry, connect instances, sync
+8. **Bazarr** — connect to Radarr/Sonarr, add subtitle providers (manual)
+9. **Profilarr** — link Dictionarry + connect instances (manual); ⚙ synced-profiles kept empty
 10. **Jellyfin** — create Libraries (Movies → `/media/movies`, TV → `/media/tv`)
 11. **Plex** — claim with `PLEX_CLAIM`, create Libraries pointing at the same `/media/movies` and `/media/tv` (see Part 16.6)
 12. **Seerr** — connect to Jellyfin, Radarr, Sonarr (optionally add Plex too)
@@ -1131,14 +1116,14 @@ This uses DuckDNS (`marlboro-bc.duckdns.org`) for dynamic DNS and NPM for the re
 
 ### 19.0 Reconcile Proxy Hosts from the Repo (scripted)
 
-The proxy topology is codified in [`setup_proxy_hosts.sh`](./setup_proxy_hosts.sh) — a declarative `HOSTS=( … )` list of `domain | forward_host | forward_port | websockets | ssl_forced` rows. Run it **after `docker compose up -d`** (NPM up on `:81`, DuckDNS reachable) to create any missing proxy host plus its DNS-01 Let's Encrypt cert through the NPM API:
+The proxy topology is codified in [`setup_services.sh`](./setup_services.sh) — a declarative `NPM_HOSTS=( … )` list of `domain | forward_host | forward_port | websockets | ssl_forced` rows (the `configure_proxy_hosts` section). Run it **after `docker compose up -d`** (NPM up on `:81`, DuckDNS reachable) to create any missing proxy host plus its DNS-01 Let's Encrypt cert through the NPM API:
 
 ```bash
 cd ~/marlboro
-./setup_proxy_hosts.sh
+./setup_services.sh
 ```
 
-It reads `NGINX_EMAIL_ID` / `NGINX_PASSWORD` / `DUCKDNS_TOKEN` from `.env`. **Idempotent:** existing hosts are skipped and never modified, so manual tweaks survive and re-runs are safe. To expose a new service, add a row to `HOSTS` and re-run.
+It reads `NGINX_EMAIL_ID` / `NGINX_PASSWORD` / `DUCKDNS_TOKEN` from `.env`. **Idempotent:** existing hosts are skipped and never modified, so manual tweaks survive and re-runs are safe. To expose a new service, add a row to `NPM_HOSTS` and re-run. (The same script also reconciles all the other in-app settings — see Part 10.)
 
 What it does **not** do (still manual, per the sections below): router port-forwarding (19.1), the AdGuard DNS rewrite (19.5 — one wildcard rule covers all subdomains), and app-side public-URL config (e.g. Jellyfin 19.6, Plex 19.10 step 3). Host-networked services (Jellyfin, Plex, Coolify, the apex) forward to the LAN IP `192.168.0.10`; bridge services (Seerr, Forgejo) forward to their container name.
 
@@ -1181,7 +1166,7 @@ docker compose up -d nginx-proxy-manager
 
 ### 19.4 Create the Jellyfin Proxy Host in NPM
 
-> **Fastest path:** [`setup_proxy_hosts.sh`](#190-reconcile-proxy-hosts-from-the-repo-scripted) already creates this host (and its cert) from the repo. The manual steps below are the same thing by hand — and the source of *why* each setting is what it is (websockets, DNS-01, force SSL).
+> **Fastest path:** [`setup_services.sh`](#190-reconcile-proxy-hosts-from-the-repo-scripted) already creates this host (and its cert) from the repo. The manual steps below are the same thing by hand — and the source of *why* each setting is what it is (websockets, DNS-01, force SSL).
 
 1. Open NPM at `http://<server-ip>:81`
 2. **Proxy Hosts → Add Proxy Host**
@@ -1274,7 +1259,7 @@ NPM communicates with Jellyfin via `host.docker.internal` which resolves to the 
 
 Plex ships its own remote-access (plex.tv relay / direct connect on `:32400`), so native Plex apps (mobile, TV, etc.) reach the server without any of this. NPM is for a clean HTTPS URL to the **web app** at `https://plex.marlboro-bc.duckdns.org`. Setup mirrors 19.4. The AdGuard wildcard rewrite from 19.5 already covers the `plex` subdomain (it's a DNS rule), but the TLS certs here are **per-subdomain — there is no wildcard cert** — so a new `plex.marlboro-bc.duckdns.org` cert is issued via DNS-01 below.
 
-> **Fastest path:** [`setup_proxy_hosts.sh`](#190-reconcile-proxy-hosts-from-the-repo-scripted) already creates this host (and its cert) from the repo. The manual steps below are the same thing by hand.
+> **Fastest path:** [`setup_services.sh`](#190-reconcile-proxy-hosts-from-the-repo-scripted) already creates this host (and its cert) from the repo. The manual steps below are the same thing by hand.
 
 1. NPM → **Proxy Hosts → Add Proxy Host → Details tab:**
    - Domain Names: `plex.marlboro-bc.duckdns.org`
