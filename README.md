@@ -30,6 +30,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 - **Glance** — Homelab dashboard
 - **Forgejo** — Self-hosted Git forge
 - **DuckDNS** — Dynamic DNS for external access
+- **Samba (SMB)** — Network file sharing of `/mnt/tank` to Mac/Windows (host, not Docker)
 
 ---
 
@@ -69,6 +70,8 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 | Sunshine web UI | 47990 HTTPS | Runs on host, not Docker |
 | Sunshine streaming | 47984, 47989 TCP | Moonlight ports |
 | Sunshine streaming | 47998–48000, 48010 UDP | Moonlight ports |
+| Samba (SMB) | 445 TCP | On host, not Docker; LAN + Tailscale only |
+| wsdd (Windows discovery) | 3702 UDP, 5357 TCP | WS-Discovery for Windows Network tab |
 
 ### Key Details
 
@@ -359,7 +362,7 @@ cd ~/marlboro
 ./setup_script.sh
 ```
 
-Generates credentials, stores everything in 1Password tagged `marlboro-nas`, pulls all values, and writes `~/marlboro/.env`. It also does the host-level, non-container setup for this pre-compose phase: media dirs + ownership, the docker wait-for-tank drop-in, and **provisioning the Sunshine stream host** (`configure_sunshine` — sway autologin + KMS capture; see Part 7). Re-run anytime to sync credentials + converge host state.
+Generates credentials, stores everything in 1Password tagged `marlboro-nas`, pulls all values, and writes `~/marlboro/.env`. It also does the host-level, non-container setup for this pre-compose phase: media dirs + ownership, the docker wait-for-tank drop-in, **provisioning the Sunshine stream host** (`configure_sunshine` — sway autologin + KMS capture; see Part 7), and the **SMB file share of `/mnt/tank`** (`configure_samba` — Mac/Windows network access; see Part 17.8). Re-run anytime to sync credentials + converge host state.
 
 > If this is a first run, the Sunshine step may print **`REBOOT REQUIRED`** (it added you to the `input` group / switched the login session to sway). Reboot before continuing, then come back for `docker compose up -d`.
 
@@ -1101,6 +1104,58 @@ for dir in encoded-video thumbs upload backups library profile; do
   touch "/mnt/tank/photos/$dir/.immich"
 done
 ```
+
+### 17.8 Network File Sharing (SMB)
+
+Exposes the tank on the macOS Finder sidebar and the Windows "Network" tab. The
+whole host side is scripted in [`setup_script.sh`](./setup_script.sh) (its
+`configure_samba` step, Part 5) — installs `samba` + `wsdd`, creates/pulls the
+SMB password from 1Password (`Marlboro NAS - Samba`), writes
+`/etc/samba/smb.conf`, advertises via avahi (Bonjour, macOS) + wsdd
+(WS-Discovery, Windows), and enables the daemons. Already handled by the Part 5
+run — there's no separate Samba command. To (re)provision just this on its own:
+
+```bash
+eval $(op signin)        # smbpasswd + the 1Password item need an active session
+./setup_script.sh        # idempotent; converges the whole host incl. Samba
+```
+
+Shares (SMB3-only, opportunistically encrypted; user `bcalegari`):
+
+| Share | Path | Access |
+|---|---|---|
+| `media` | `/mnt/tank/media` | read-write (movies/tv/roms) |
+| `downloads` | `/mnt/tank/downloads` | read-write |
+
+`photos` is **not** shared — it's Immich-managed and writing to it out-of-band
+would drift Immich's DB. smbd binds all addresses and is fenced by **source
+subnet** (`hosts allow`/`hosts deny`) to LAN + Tailscale + loopback — docker
+bridges (172.16/12) are denied. (`bind interfaces only` is *not* used: it can't
+serve Tailscale, whose point-to-point TUN Samba's interface matching drops —
+and MagicDNS resolves `marlboro` to the tailnet IP, so SMB must answer there.)
+Every connection is still user/password-gated and SMB3-encrypted. No ufw is active; if you enable it,
+allow `445/tcp` (SMB), `3702/udp` + `5357/tcp` (wsdd), and `5353/udp` (mDNS).
+
+**Mounting from a Mac** — `marlboro` appears in the Finder sidebar under
+Network/Locations, or connect explicitly with **⌘K** (Finder → Go → Connect to
+Server). Username `bcalegari`, password from the `Marlboro NAS - Samba` item:
+
+```
+smb://<lan-ip>/media            # on the LAN
+smb://<tailscale-ip>/media      # remote, over Tailscale
+```
+
+**Mounting from Windows** — `MARLBORO` shows in File Explorer → Network, or type
+into the address bar (same credentials):
+
+```
+\\<lan-ip>\media
+\\<tailscale-ip>\media           # remote, over Tailscale
+```
+
+> Retrieve the IPs with `op item get "Marlboro NAS - Network" --vault Private
+> --fields static-ip` (and `--fields tailscale-ip`). To rotate the SMB password:
+> `op item edit "Marlboro NAS - Samba" password=…` then re-run `setup_script.sh`.
 
 ---
 

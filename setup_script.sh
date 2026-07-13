@@ -101,6 +101,9 @@ ensure_secret   "Marlboro NAS - Speedtest App Key"        "speedtest" "base64:$(
 # run); lives in 1Password so the admin-create command can pull it.
 ensure_password "Marlboro NAS - Forgejo"                  "ben"
 
+# Samba/SMB — password synced into smbpasswd by configure_samba (host file share).
+ensure_password "Marlboro NAS - Samba"                    "bcalegari"
+
 # DuckDNS token must be created manually — just warn if missing
 if ! op item get "Marlboro NAS - DuckDNS" --vault "$VAULT" &>/dev/null; then
   log "WARNING: 'Marlboro NAS - DuckDNS' not found in 1Password — DUCKDNS_TOKEN will be blank"
@@ -665,6 +668,185 @@ EOF
   log "  Sunshine provisioned (services enabled; start on next sway session)"
 }
 configure_sunshine
+
+# ─── Provision SMB/CIFS file sharing for /mnt/tank ───────────────────────────
+# Exposes media + downloads on the macOS Finder sidebar (avahi/Bonjour) and the
+# Windows Network tab (wsdd/WS-Discovery). Native host service, not Docker.
+# Fenced to LAN + Tailscale via `bind interfaces only` (docker bridges excluded);
+# still user/password-gated + SMB3-encrypted. Password comes from the
+# "Marlboro NAS - Samba" 1Password item (created above), synced into smbpasswd.
+# Degrades gracefully: warns + skips rather than aborting the whole run.
+configure_samba() {
+  log "Provisioning Samba (SMB share of /mnt/tank)…"
+  local SMB_USER="bcalegari" WORKGROUP="WORKGROUP" LAN_IFACES="enp4s0 wlp3s0"
+  local SMB_ITEM="Marlboro NAS - Samba"
+
+  [ -d /mnt/tank ] || { log "  WARNING: /mnt/tank not mounted — skipping Samba"; return; }
+
+  # Packages
+  local need_pkgs=()
+  dpkg -s samba &>/dev/null || need_pkgs+=(samba)
+  dpkg -s wsdd  &>/dev/null || need_pkgs+=(wsdd)
+  if [ ${#need_pkgs[@]} -gt 0 ]; then
+    log "  installing: ${need_pkgs[*]}"
+    sudo apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${need_pkgs[@]}"
+  else
+    log "  samba + wsdd already installed"
+  fi
+
+  # Credential: sync smbpasswd from 1Password
+  local SMB_PASS; SMB_PASS=$(pull_field "$SMB_ITEM" password)
+  [ -n "$SMB_PASS" ] || { log "  WARNING: '$SMB_ITEM' password blank in 1Password — skipping Samba"; return; }
+  id "$SMB_USER" &>/dev/null || { log "  WARNING: unix user '$SMB_USER' missing — skipping Samba"; return; }
+  if sudo pdbedit -L 2>/dev/null | grep -q "^${SMB_USER}:"; then
+    log "  syncing SMB password for '$SMB_USER'"
+    printf '%s\n%s\n' "$SMB_PASS" "$SMB_PASS" | sudo smbpasswd -s "$SMB_USER"
+  else
+    log "  adding SMB user '$SMB_USER'"
+    printf '%s\n%s\n' "$SMB_PASS" "$SMB_PASS" | sudo smbpasswd -s -a "$SMB_USER"
+  fi
+  sudo smbpasswd -e "$SMB_USER" >/dev/null
+
+  # Share dirs (created by the media-dir block above)
+  local d
+  for d in /mnt/tank/media /mnt/tank/downloads; do
+    [ -d "$d" ] || { log "  WARNING: missing share path $d — skipping Samba"; return; }
+  done
+
+  # smb.conf — SMB3-only + opportunistic encryption; vfs_fruit for macOS Finder.
+  log "  writing /etc/samba/smb.conf"
+  sudo tee /etc/samba/smb.conf >/dev/null <<EOF
+#
+# Managed by setup_script.sh (configure_samba) — edits here are overwritten.
+#
+[global]
+   workgroup = ${WORKGROUP}
+   server string = Marlboro NAS
+   server role = standalone server
+   security = user
+   map to guest = never
+   passdb backend = tdbsam
+
+   # Access fence by source subnet: LAN + Tailscale (v4 100.64/10, v6 all-ULA
+   # fc00::/7 covers tailnet + LAN ULA) + loopback. NOT `bind interfaces only`
+   # — that can't serve Tailscale (its point-to-point TUN is dropped by Samba's
+   # interface matching), so smbd binds all addresses and we deny by source
+   # instead. Docker bridges (172.16/12) aren't in the allow-list → denied.
+   # (allow wins over deny; every connection is still auth-gated + SMB3.)
+   hosts allow = 127.0.0.0/8 192.168.0.0/24 100.64.0.0/10 fc00::/7 ::1
+   hosts deny = 0.0.0.0/0 ::/0${TS_ADDRS}
+
+   # Modern, encrypted transport only.
+   server min protocol = SMB3_00
+   client min protocol = SMB3_00
+   smb encrypt = desired
+
+   # No printer sharing.
+   load printers = no
+   printing = bsd
+   printcap name = /dev/null
+   disable spoolss = yes
+
+   # macOS interop (vfs_fruit): Finder metadata, resource forks, sparse files.
+   vfs objects = catia fruit streams_xattr
+   fruit:metadata = stream
+   fruit:model = MacSamba
+   fruit:posix_rename = yes
+   fruit:veto_appledouble = no
+   fruit:nfs_aces = no
+   fruit:wipe_intentionally_left_blank_rfork = yes
+   fruit:delete_empty_adfiles = yes
+
+   # Throughput.
+   socket options = TCP_NODELAY IPTOS_LOWDELAY
+   use sendfile = yes
+   aio read size = 1
+   aio write size = 1
+
+[media]
+   comment = Movies, TV, ROMs
+   path = /mnt/tank/media
+   browseable = yes
+   read only = no
+   valid users = ${SMB_USER}
+   force user = ${SMB_USER}
+   force group = ${SMB_USER}
+   create mask = 0664
+   directory mask = 0775
+
+[downloads]
+   comment = Torrent downloads
+   path = /mnt/tank/downloads
+   browseable = yes
+   read only = no
+   valid users = ${SMB_USER}
+   force user = ${SMB_USER}
+   force group = ${SMB_USER}
+   create mask = 0664
+   directory mask = 0775
+EOF
+  testparm -s /etc/samba/smb.conf >/dev/null 2>&1 \
+    || { log "  WARNING: testparm rejected smb.conf — skipping Samba restart"; return; }
+
+  # macOS discovery (avahi/Bonjour): advertise _smb._tcp for the Finder sidebar.
+  log "  writing /etc/avahi/services/samba.service"
+  sudo tee /etc/avahi/services/samba.service >/dev/null <<'EOF'
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">%h</name>
+  <service>
+    <type>_smb._tcp</type>
+    <port>445</port>
+  </service>
+  <service>
+    <type>_device-info._tcp</type>
+    <port>0</port>
+    <txt-record>model=RackMac</txt-record>
+  </service>
+</service-group>
+EOF
+
+  # Windows discovery (wsdd/WS-Discovery). The Ubuntu package ships only the
+  # binary — no systemd unit — so install our own, scoped to the LAN interfaces
+  # + workgroup. (macOS uses avahi above; wsdd is Windows-only.)
+  local WSDD_IFACE_ARGS="" i
+  for i in ${LAN_IFACES}; do WSDD_IFACE_ARGS+=" --interface ${i}"; done
+  if command -v wsdd &>/dev/null; then
+    log "  installing wsdd.service (Windows discovery)"
+    sudo tee /etc/systemd/system/wsdd.service >/dev/null <<EOF
+[Unit]
+Description=Web Services Dynamic Discovery host daemon (Windows network browsing)
+Documentation=man:wsdd(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wsdd --workgroup ${WORKGROUP}${WSDD_IFACE_ARGS}
+User=nobody
+Group=nogroup
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo systemctl daemon-reload
+  fi
+
+  # Daemons: smbd is core; nmbd/wsdd/avahi are best-effort discovery.
+  sudo systemctl enable smbd >/dev/null 2>&1 || true
+  sudo systemctl restart smbd \
+    || { log "  WARNING: smbd failed to start — check: sudo systemctl status smbd"; return; }
+  for i in nmbd wsdd avahi-daemon; do
+    sudo systemctl enable "$i" >/dev/null 2>&1 || true
+    sudo systemctl restart "$i" || log "  WARNING: $i failed to (re)start — SMB works, its discovery degraded"
+  done
+  log "  Samba live — shares: media (rw), downloads (rw); user $SMB_USER"
+}
+configure_samba
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 

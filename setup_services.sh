@@ -250,6 +250,13 @@ next_id = (max([f.get('id', 0) for f in filters], default=0)) + 1
 for url, name in want.items():
     if url not in have:
         filters.append({'enabled': True, 'url': url, 'name': name, 'id': next_id}); next_id += 1; changed = True
+# Local DNS rewrites so bare hostnames resolve to the NAS on the LAN
+# (e.g. \\marlboro / smb://marlboro for SMB — see Part 17.8).
+rewrites = cfg.setdefault('filtering', {}).setdefault('rewrites', [])
+want_rewrites = [{'domain': 'marlboro', 'answer': '192.168.0.10', 'enabled': True}]
+for rw in want_rewrites:
+    if rw not in rewrites:
+        rewrites.append(rw); changed = True
 if changed:
     with open(p, 'w') as f: yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
 print('changed' if changed else 'unchanged')
