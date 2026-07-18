@@ -13,6 +13,8 @@
 #   Sonarr/Radarr— download client, root folder, and applies the tracked
 #                  services/<app>/settings/*.json (quality profile "Any",
 #                  naming, media management, delay profile)
+#   Seerr        — Sonarr/Radarr server link (quality profile + root folder),
+#                  resolved by profile NAME so it survives Profilarr id churn
 #   Prowlarr     — Sonarr/Radarr applications + FlareSolverr indexer proxy
 #   AdGuard      — upstream DNS, rate limit, DNS blocklists (sudo yaml reconcile)
 #   NginxProxyMgr— proxy hosts + Let's Encrypt certs (DNS-01 via DuckDNS) from
@@ -34,6 +36,7 @@ SONARR=http://localhost:8989
 RADARR=http://localhost:7878
 PROWLARR=http://localhost:9696
 QBIT=http://localhost:8181
+SEERR=http://localhost:5055
 NPM=http://localhost:81
 # Container-network coordinates the *arr apps use to reach each other:
 QBIT_HOST=qbittorrent; QBIT_PORT=8080
@@ -153,6 +156,70 @@ configure_arr() {
       && log "  applied delayprofile.json" || warn "  failed applying delay profile"
     rm -f "$dp"
   fi
+}
+
+# ─── Seerr: Sonarr/Radarr server link (quality profile + root folder) ────────
+# Jellyseerr keeps its *arr server config (which quality profile + root folder a
+# request uses) in its OWN settings.json — gitignored because the app mutates it.
+# It drifted once: pointed at dead profileId 7 + root '/tv' (Sonarr's real root
+# is /data/media/tv), so every request 400'd with "Quality Profile does not
+# exist" / "Root folder '/tv' does not exist". Reconcile the link here.
+#
+# Resolve the profile by NAME (not id): Profilarr sync churns profile ids, so a
+# hardcoded id is exactly what broke. SEERR_PROFILE is the live Profilarr-managed
+# profile — change it here if you want requests to use a different one.
+SEERR_SETTINGS="$SCRIPT_DIR/services/jellyseerr/config/settings.json"
+SEERR_PROFILE="2160p Quality"
+
+# Read Seerr's API key from its own settings.json (no separate 1Password item).
+seerr_key() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["main"]["apiKey"])' "$SEERR_SETTINGS" 2>/dev/null; }
+
+# Resolve a quality-profile id by name in an *arr. Echoes id, or empty if absent.
+arr_profile_id() { arr_get "$1" "$2" "/api/v3/qualityprofile" | jq -r --arg n "$3" '[.[]|select(.name==$n)][0].id // empty'; }
+
+configure_seerr() {
+  log "Seerr: Sonarr/Radarr server link (profile + root folder)"
+  [ -f "$SEERR_SETTINGS" ] || { warn "  settings.json missing — Seerr not initialized yet, skipping"; return; }
+  local key; key=$(seerr_key)
+  [ -n "$key" ] || { warn "  Seerr API key unreadable in settings.json — skipping"; return; }
+  up "$SEERR/api/v1/status" || { warn "  Seerr unreachable on :5055 — skipping"; return; }
+  local spec kind base arrkey root pid
+  for spec in "sonarr|$SONARR|$SONARR_KEY|/data/media/tv" \
+              "radarr|$RADARR|$RADARR_KEY|/data/media/movies"; do
+    IFS='|' read -r kind base arrkey root <<<"$spec"
+    [ -n "$arrkey" ] || { warn "  $kind: arr API key blank — skipping"; continue; }
+    pid=$(arr_profile_id "$base" "$arrkey" "$SEERR_PROFILE")
+    [ -n "$pid" ] || { warn "  $kind: profile '$SEERR_PROFILE' not in $kind — sync it in Profilarr, then re-run"; continue; }
+    python3 - "$SEERR" "$key" "$kind" "$pid" "$SEERR_PROFILE" "$root" <<'PY'
+import sys, json, urllib.request, urllib.error
+base, key, kind, pid, pname, root = sys.argv[1:7]
+pid = int(pid); is_anime = (kind == "sonarr")   # Radarr has no anime fields
+def req(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    r = urllib.request.Request(f"{base}/api/v1/settings/{path}", data=data, method=method,
+                               headers={"X-Api-Key": key, "Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(r))
+try:
+    servers = req("GET", kind)
+except urllib.error.HTTPError as e:
+    print(f"  {kind}: GET failed ({e.code}) — skipping"); sys.exit(0)
+if not servers:
+    print(f"  {kind}: no server configured in Seerr — add it in the UI first"); sys.exit(0)
+desired = {"activeProfileId": pid, "activeProfileName": pname, "activeDirectory": root}
+if is_anime:
+    desired |= {"activeAnimeProfileId": pid, "activeAnimeProfileName": pname, "activeAnimeDirectory": root}
+changed = []
+for s in servers:
+    if not any(k in s and s[k] != v for k, v in desired.items()):
+        continue
+    sid = s.pop("id")                       # id is read-only in the PUT body
+    for k, v in desired.items():
+        if k in s: s[k] = v
+    req("PUT", f"{kind}/{sid}", s); changed.append(s["name"])
+print(f"  {kind}: " + (f"reconciled {', '.join(changed)} → profile '{pname}' (id {pid}), root {root}"
+                       if changed else "already matches"))
+PY
+  done
 }
 
 # ─── Prowlarr: apps + FlareSolverr proxy ─────────────────────────────────────
@@ -349,6 +416,7 @@ configure_proxy_hosts() {
 configure_qbit
 configure_arr "Sonarr" "$SONARR" "$SONARR_KEY" "tv-sonarr" "/data/media/tv"     "$SCRIPT_DIR/services/sonarr/settings"
 configure_arr "Radarr" "$RADARR" "$RADARR_KEY" "radarr"    "/data/media/movies"  "$SCRIPT_DIR/services/radarr/settings"
+configure_seerr
 configure_prowlarr
 configure_adguard
 configure_proxy_hosts

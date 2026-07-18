@@ -27,6 +27,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 - **Scrutiny** — Drive S.M.A.R.T. monitoring
 - **Watchtower** — Automatic container updates
 - **Uptime Kuma** — Uptime monitoring
+- **ntfy** — Self-hosted push notifications (Profilarr sends quality-profile drift alerts here)
 - **Glance** — Homelab dashboard
 - **Forgejo** — Self-hosted Git forge
 - **DuckDNS** — Dynamic DNS for external access
@@ -64,6 +65,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 | Nginx Proxy Manager (https) | 443 | |
 | Scrutiny | 8085 | Internal container port is 8080 |
 | Uptime Kuma | 3002 | Internal container port is 3001 |
+| ntfy | 8194 | Push notifications; internal container port is 80. LAN/Tailscale only (not proxied) |
 | Forgejo (web) | 3003 | Internal container port is 3000 |
 | Forgejo (git SSH) | 2222 | Maps to container 22; host 22 is the OS sshd |
 | DuckDNS | — | No ports, DDNS updater only |
@@ -121,8 +123,8 @@ op item get "Marlboro NAS - Network" --vault Private
 **Watchtower requires `DOCKER_API_VERSION=1.55`** to match the 26.04 host Docker engine. This pin tracks the host engine's API version, so revisit it after any OS/engine upgrade — match `docker version --format '{{.Server.APIVersion}}'`.
 
 **Watchtower watches every container (no `WATCHTOWER_LABEL_ENABLE`) and updates nightly at 4 AM.** That's fine for stateless services, but data-bearing apps that ship breaking DB migrations must not float — an unattended major bump can crash-loop or corrupt on-disk data (this bit Immich: a `:release` jump to v3 dropped pgvecto.rs while the DB image stayed put). Policy:
-- **Pin the tag** so Watchtower only patches within a safe line: `jellyfin:10.11`, `mariadb:12` (romm-db), `rommapp/romm:4`, `jc21/nginx-proxy-manager:2`, `codeberg.org/forgejo/forgejo:11`, `postgres:15-alpine`/`14-…` (coolify-db, immich-postgres). Bump these deliberately after reading release notes; **back up the DB first** for anything stateful.
-- **Fence with `com.centurylinklabs.watchtower.enable=false`** where there's no clean version tag or the app self-updates: Immich (`immich-server`/`immich-machine-learning`/`immich-postgres`, upgraded by hand in lockstep) and Coolify (`coolify`/`coolify-realtime`, update via Coolify's own UI).
+- **Pin the tag** so Watchtower only patches within a safe line: `jellyfin:10.11`, `mariadb:12` (romm-db), `rommapp/romm:4`, `jc21/nginx-proxy-manager:2`, `codeberg.org/forgejo/forgejo:11`, `postgres:15-alpine`/`14-…` (coolify-db, immich-postgres), `binwiederhier/ntfy:2.26.0` (pinned by tag+digest). Bump these deliberately after reading release notes; **back up the DB first** for anything stateful.
+- **Fence with `com.centurylinklabs.watchtower.enable=false`** where there's no clean version tag or the app self-updates: Immich (`immich-server`/`immich-machine-learning`/`immich-postgres`, upgraded by hand in lockstep), Coolify (`coolify`/`coolify-realtime`, update via Coolify's own UI), and ntfy (holds a message cache DB — pinned, bump deliberately).
 
 **Sunshine runs as the native Ubuntu `.deb`** (not Docker), started by `systemctl --user` inside a **sway** (wlroots) session, capturing the connected display with `capture=kms`. Sway is required: GNOME/Mutter Wayland is uncapturable (empty KMS monitor list, no `wlr-screencopy`) and questing ships no GNOME-on-Xorg session, so `capture=x11` is a dead end. It streams **H.264 only** — this Mac Mini's Intel UHD 630 can decode HEVC but has no HEVC/AV1 *encode* entrypoint (same hardware limit as the Jellyfin note). The whole host is provisioned idempotently by `setup_script.sh` (its `configure_sunshine` step, Part 5/7) — including seeding the web-UI login from 1Password; only Moonlight pairing is manual (Part 7).
 
@@ -721,6 +723,12 @@ Profilarr syncs quality profiles + custom formats from the Dictionarry database 
 6. In each arr, assign your library to `2160p Quality` (Sonarr *series editor* / Radarr *movie editor*, bulk).
 
 > **Resurrect gotcha:** a Sync pushes **only the profiles you tick**. Tick just the one you want — if you select a profile and later delete it in Sonarr/Radarr, the next Sync re-creates it. Starting from a clean v2 install (nothing selected) is the moment to avoid this permanently.
+
+**Drift notifications (via ntfy).** Sync is manual (auto-on-pull left **off**), so Profilarr's **drift detection** is the safety net: it periodically compares the live arr profiles against what Profilarr expects and alerts when they diverge (e.g. a Dictionarry DB update changed `2160p Quality` upstream → time to review + re-Sync). Alerts go to the self-hosted **ntfy** container (`http://ntfy:80` in-stack; `http://192.168.0.10:8194` on LAN/Tailscale). This wiring is **UI-only** (v2 notifications/drift are form-action, not API):
+
+1. **Subscribe** on your phone/browser: ntfy app → add server `http://192.168.0.10:8194` (reachable on LAN or over Tailscale) → subscribe to a topic, e.g. `marlboro-drift` (pick a hard-to-guess name — the server is open read-write, network-gated only).
+2. **Profilarr → Settings → Notifications → New → ntfy**: **Server URL** `http://ntfy:80`, **Topic** `marlboro-drift`, enable the **drift** event type, **Save**, then **Test** (confirm it lands on your phone).
+3. **Per arr → Drift**: enable drift detection and set a check schedule (cron). Leave auto-sync off — the alert tells you *when* a manual re-Sync is worth doing.
 
 ### 10.9 Seerr
 

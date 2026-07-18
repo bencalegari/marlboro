@@ -203,6 +203,36 @@ services:
       interval: 15s
       retries: 3
 
+  # ─── Push Notifications ───────────────────────────────────────────────────
+  # Self-hosted ntfy — pub/sub push. In-stack services publish to it at
+  # http://ntfy:80 (Profilarr sends quality-profile drift alerts here). Subscribe
+  # from the ntfy phone/web app pointed at this server over LAN / Tailscale.
+  # NOT exposed via NPM: default access is open read-write, so keep it network-
+  # gated (same posture as Flood/qBittorrent). Pinned + Watchtower-fenced — it
+  # holds a message cache DB (see README Watchtower policy).
+  ntfy:
+    container_name: ntfy
+    image: binwiederhier/ntfy:2.26.0@sha256:a6d335064ae927c4dbef118e1fa39656b3d2e01472b2a82af5915d5cebfe815f
+    command: serve
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./services/ntfy/config:/etc/ntfy
+      - ./services/ntfy/cache:/var/cache/ntfy
+    ports:
+      - "8194:80"
+    labels:
+      - com.centurylinklabs.watchtower.enable=false   # cache DB — pin, don't auto-update
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:80/v1/health 2>/dev/null | grep -q '\"healthy\":true' || exit 1"]
+      start_period: 10s
+      timeout: 5s
+      interval: 30s
+      retries: 3
+
   # ─── Torrent Client ───────────────────────────────────────────────────────
   # BitTorrent engine. Its built-in WebUI lives at :8181; the day-to-day UI is
   # Flood (below), which talks to the same Web API at qbittorrent:8080.

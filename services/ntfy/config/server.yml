@@ -1,0 +1,23 @@
+# ntfy server config — authored, tracked in git.
+# Runtime state (cache.db, auth.db, attachments) lives in ../cache and is
+# gitignored. Docs: https://docs.ntfy.sh/config/
+#
+# Access is gated at the network layer (LAN / Tailscale) — this server is NOT
+# exposed publicly via Nginx Proxy Manager, so default open read-write is fine.
+# In-stack publishers (Profilarr drift alerts) reach it at http://ntfy:80.
+
+# Public URL used in notification links/attachments. LAN IP — reachable on the
+# LAN and over Tailscale; bump to a proxied hostname if ever exposed via NPM.
+base-url: "http://192.168.0.10:8194"
+
+listen-http: ":80"
+
+# Message + attachment cache (survives restarts). Kept short — these are
+# transient alerts, not a datastore.
+cache-file: "/var/cache/ntfy/cache.db"
+cache-duration: "12h"
+attachment-cache-dir: "/var/cache/ntfy/attachments"
+
+# Quiet the startup warnings; we don't use auth (network-gated).
+auth-file: "/var/cache/ntfy/auth.db"
+auth-default-access: "read-write"

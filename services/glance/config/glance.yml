@@ -407,6 +407,9 @@ pages:
               - title: Scrutiny
                 url: http://scrutiny:8080
                 same-tab: true
+              - title: ntfy
+                url: http://ntfy:80
+                same-tab: true
 
           # ── Nginx Proxy Manager — proxy hosts (glanceapp/community-widgets)
           - type: custom-api
@@ -541,6 +544,8 @@ pages:
                     url: http://192.168.0.10:81
                   - title: Uptime Kuma
                     url: http://192.168.0.10:3002
+                  - title: ntfy
+                    url: http://192.168.0.10:8194
                   - title: Scrutiny
                     url: http://192.168.0.10:8085
                   - title: Sunshine
@@ -579,6 +584,8 @@ pages:
                     url: http://${TAILSCALE_HOSTNAME}:81
                   - title: Uptime Kuma
                     url: http://${TAILSCALE_HOSTNAME}:3002
+                  - title: ntfy
+                    url: http://${TAILSCALE_HOSTNAME}:8194
                   - title: Scrutiny
                     url: http://${TAILSCALE_HOSTNAME}:8085
                   - title: Sunshine

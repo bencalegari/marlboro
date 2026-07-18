@@ -29,6 +29,14 @@ services/sonarr/*
 services/radarr/*
 !services/radarr/settings/
 
+# Exception: ntfy server.yml is config we author. The message cache + auth DB
+# under services/ntfy/cache/ is runtime state — stays ignored.
+!services/ntfy/
+services/ntfy/*
+!services/ntfy/config/
+services/ntfy/config/*
+!services/ntfy/config/server.yml
+
 # Media & downloads
 media/
 downloads/
