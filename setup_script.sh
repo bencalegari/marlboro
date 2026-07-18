@@ -592,6 +592,10 @@ EOF
   # 9. sunshine.conf: KMS + VAAPI + auto-detected CSRF origins + wake-on-stream.
   #    csrf_allowed_origins must list every IP the web UI is reached by (browser
   #    Origin includes :47990). Rewrite only if absent/stale (never clobber a working conf).
+  #    origin_web_ui_allowed = wan (not lan): pairing/admin happens from the phone
+  #    over Tailscale (100.64/10), which Sunshine classifies as WAN — 'lan' rejects
+  #    the PIN POST ("Web UI: [100.x] -- not authorized"). Still password-gated and
+  #    :47990 is only reachable via LAN + tailnet (never internet-forwarded).
   ORIGINS="$(ip -4 -o addr show scope global 2>/dev/null \
              | awk '$2 !~ /^(docker|br-|veth|virbr|lo)/ {print $4}' | cut -d/ -f1 \
              | sed 's#^#https://#; s#$#:47990#' | paste -sd, -)"
@@ -607,7 +611,7 @@ EOF
 capture = kms
 encoder = vaapi
 adapter_name = /dev/dri/renderD128
-origin_web_ui_allowed = lan
+origin_web_ui_allowed = wan
 csrf_allowed_origins = $ORIGINS
 global_prep_cmd = [{"do":"$CONF_DIR/display.sh stream-start","undo":"$CONF_DIR/display.sh stream-end","elevated":"false"}]
 EOF
@@ -660,6 +664,27 @@ EOF
       log "  'Marlboro NAS - Sunshine' username/password not in 1Password — set the web-UI login manually"
     fi
   fi
+
+  # 10.7 Drop-in: wake the monitor before Sunshine starts so KMS capture has a LIT
+  #      connector for its startup encoder probe. A start/restart while the monitor
+  #      is DPMS-off (swayidle blanked it / OLED slept) yields an empty KMS monitor
+  #      list → "Video failed to find working encoder" → no stream + Moonlight
+  #      pairing won't stick. Both lines are non-fatal (- prefix) so a wake failure
+  #      never blocks Sunshine; re-arming swayidle resets a clean ${IDLE_TIMEOUT}s
+  #      countdown so the monitor still sleeps when the box is unused. Drop-in (not
+  #      the packaged unit) so a package upgrade can't clobber it.
+  log "  writing Sunshine ExecStartPre wake drop-in…"
+  local DROPIN_DIR="$UNIT_DIR/app-dev.lizardbyte.app.Sunshine.service.d"
+  mkdir -p "$DROPIN_DIR"
+  cat > "$DROPIN_DIR/override.conf" <<EOF
+# Managed by setup_script.sh (configure_sunshine) — edits here are overwritten.
+# Wake the shared monitor before Sunshine starts so KMS capture has a LIT
+# connector for its startup encoder probe. Non-fatal (- prefix) so a wake failure
+# never blocks Sunshine; re-arming swayidle keeps the monitor sleeping when unused.
+[Service]
+ExecStartPre=-$CONF_DIR/display.sh wake
+ExecStartPre=-/usr/bin/systemctl --user restart swayidle.service
+EOF
 
   # 11. Enable the user services (start inside the sway session after reboot).
   systemctl --user daemon-reload
