@@ -410,6 +410,9 @@ pages:
               - title: ntfy
                 url: http://ntfy:80
                 same-tab: true
+              # No bookmark for this one — it's an API bridge with no web UI.
+              - title: SMS Bridge
+                url: http://sms-bridge:8080/healthz
 
           # ── Nginx Proxy Manager — proxy hosts (glanceapp/community-widgets)
           - type: custom-api

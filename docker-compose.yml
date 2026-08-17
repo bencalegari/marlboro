@@ -203,6 +203,55 @@ services:
       interval: 15s
       retries: 3
 
+  # ─── SMS Requests ─────────────────────────────────────────────────────────
+  # Text a title to the Twilio number -> numbered matches back -> reply with a
+  # number -> Seerr request -> a text when it lands in Jellyfin. See README
+  # "SMS Requests" for the Twilio account + toll-free verification steps.
+  #
+  # Stock python image with the script bind-mounted (stdlib only, no pip, no
+  # Dockerfile) — same shape as ntfy/Glance: stock image + authored config.
+  #
+  # Only /twilio/inbound is public (NPM 404s the rest on sms.marlboro-bc.duckdns.org
+  # — see NPM_HOSTS in setup_services.sh). /seerr/hook and /healthz are LAN/tailnet
+  # only. Seerr's settings.json is mounted read-only purely to read main.apiKey,
+  # mirroring seerr_key() in setup_services.sh. Pinned + Watchtower-fenced: it
+  # holds a SQLite session/dedupe DB (see README Watchtower policy).
+  sms-bridge:
+    container_name: sms-bridge
+    image: python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+    command: python -u /app/bridge.py
+    init: true
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - TZ=America/Los_Angeles
+      - SEERR_URL=http://seerr:5055
+      - SEERR_SETTINGS=/seerr-settings.json
+      - SMS_DB=/app/data/bridge.db
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_FROM_NUMBER=${TWILIO_FROM_NUMBER}
+      - SMS_ALLOWLIST=${SMS_ALLOWLIST}
+      - SMS_BRIDGE_HOOK_SECRET=${SMS_BRIDGE_HOOK_SECRET}
+      - SMS_BRIDGE_PUBLIC_URL=${SMS_BRIDGE_PUBLIC_URL}
+      - SMS_DAILY_CAP=${SMS_DAILY_CAP}
+    volumes:
+      - ./services/sms-bridge:/app
+      - ./services/jellyseerr/config/settings.json:/seerr-settings.json:ro
+    ports:
+      - "8195:8080"
+    depends_on:
+      - seerr
+    labels:
+      - com.centurylinklabs.watchtower.enable=false   # session DB — pin, don't auto-update
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz',timeout=3).read()==b'ok' else 1)\""]
+      start_period: 10s
+      timeout: 5s
+      interval: 30s
+      retries: 3
+
   # ─── Push Notifications ───────────────────────────────────────────────────
   # Self-hosted ntfy — pub/sub push. In-stack services publish to it at
   # http://ntfy:80 (Profilarr sends quality-profile drift alerts here). Subscribe

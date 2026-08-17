@@ -28,6 +28,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 - **Watchtower** — Automatic container updates
 - **Uptime Kuma** — Uptime monitoring
 - **ntfy** — Self-hosted push notifications (Profilarr sends quality-profile drift alerts here)
+- **SMS Bridge** — Text a title to the Twilio number to request it in Seerr; get a text back when it lands in Jellyfin
 - **Glance** — Homelab dashboard
 - **Forgejo** — Self-hosted Git forge
 - **DuckDNS** — Dynamic DNS for external access
@@ -66,6 +67,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 | Scrutiny | 8085 | Internal container port is 8080 |
 | Uptime Kuma | 3002 | Internal container port is 3001 |
 | ntfy | 8194 | Push notifications; internal container port is 80. LAN/Tailscale only (not proxied) |
+| SMS Bridge | 8195 | Twilio ↔ Seerr glue; internal container port is 8080. Only `/twilio/inbound` is public — see Part 23 |
 | Forgejo (web) | 3003 | Internal container port is 3000 |
 | Forgejo (git SSH) | 2222 | Maps to container 22; host 22 is the OS sshd |
 | DuckDNS | — | No ports, DDNS updater only |
@@ -1751,6 +1753,214 @@ git clone https://git.marlboro-bc.duckdns.org/<owner>/<repo>.git
 To avoid retyping, they can cache it with `git config --global credential.helper store` (or their OS keychain helper).
 
 **Revoking access:** delete the token (their **Settings → Applications**), remove them as a collaborator, or deactivate the whole account in **Site Administration → Users**. Per-token revocation is the least disruptive.
+
+---
+
+## Part 23: SMS Requests (Twilio → Seerr → Jellyfin)
+
+Text a title to the house number, get numbered matches back, reply with a number, get a text when it's playable in Jellyfin. Nothing to install on anyone's phone.
+
+```
+  "dune part two"  ──►  Twilio  ──►  NPM :443  ──►  sms-bridge  ──►  Seerr
+                                                          ▲             │
+  "1. Dune: Part Two (2024) [movie]  ◄───────────────────┘             │
+   Reply 1-3 to request."                                              ▼
+                                                                  Radarr/Sonarr
+  "Dune: Part Two is ready on Jellyfin."  ◄── sms-bridge ◄── Seerr webhook
+```
+
+The bridge itself (`services/sms-bridge/bridge.py`), its proxy host, and Seerr's webhook agent are all scripted — ⚙ `setup_services.sh` handles them. What's below is only the part that can't be: the Twilio account, the number, and collecting people's phone numbers.
+
+### 23.1 Number and carrier registration (10DLC sole proprietor)
+
+**Toll-free was tried first and failed. Don't retry it.** Recorded so nobody repeats it:
+
+| Attempt | Result |
+|---|---|
+| 1st | `30530` Entity Misclassification — `business_type=SOLE_PROPRIETOR` with `business_name="Cousin Ben Consulting LLC"`. Auto-rejected in 15 seconds. Fixed by using the individual's name plus `doing_business_as`. |
+| 2nd | `30445` business information could not be verified, `30489` website must be established and active, `30513` opt-in consent required. |
+
+Root cause of the second round: **toll-free verification is business vetting.** There is no business here, no established website, and the contact email was an iCloud Hide My Email relay. Pointing `business_website` at the self-hosted Forgejo (`git.marlboro-bc.duckdns.org`) made it worse — a dynamic-DNS host serving a git repo is not an established site, and that alone earns `30489`. Don't go back to toll-free without a registered domain with real content and a non-relay mailbox.
+
+10DLC sole proprietor is the path built for an individual with no company and no website: verification is **identity-based** (legal name, address, email, mobile OTP), website optional. Costs about $4 once for the brand, ~$2/mo for the campaign, and ~$1.15/mo for a local number. Sole-prop throughput caps are far above a few messages a week.
+
+**Upgrade off the trial first.** A trial account can only message numbers you've verified in the console, and it prepends `Sent from your Twilio trial account -` to every message — which corrupts the sample messages and any screenshot you submit.
+
+**Steps:**
+
+1. **Buy a local number.** Phone Numbers → Buy a number → filter **Local**, capability **SMS**.
+2. **Register the brand.** Messaging → Regulatory Compliance → A2P 10DLC → Brands → create, type **Sole Proprietor**. Two things that caused `30445` last time and will do it again here:
+   - Use a **real mailbox**, not an iCloud Hide My Email relay. Relay aliases read as unverifiable to identity checks.
+   - Make the **address match the state of the mobile number you verify with**. A San Francisco address with a `+1603` New Hampshire phone is a standard mismatch trigger.
+3. **Create the campaign.** Sole-prop brands allow exactly one. Use the samples and opt-in wording from 23.2.
+4. **Create a Messaging Service**, add the number to its sender pool, and link the campaign. 10DLC sending requires this.
+5. **Keep the inbound webhook working.** A Messaging Service can override the number's own webhook — either enable *use inbound webhook on number* on the Service, or set the Service's inbound webhook to the same URL from 23.3.
+6. **Release the toll-free number** once 10DLC is delivering, to stop paying $2.15/mo for it.
+
+### 23.2 Registration content: samples, opt-in, keywords
+
+The campaign asks for the same substance the toll-free form did.
+
+| Field | What to put |
+|---|---|
+| Use case | Sole Proprietor (the only option on a sole-prop brand) |
+| Description | Private household media server. Members text a movie or TV title to request it and receive one notification when it becomes available. Every conversation is initiated by the member. |
+| Opt-in method | Consumer-initiated: the member texts a title to the number. Numbers were also collected verbally, in person. No web form, no purchased or imported lists, no marketing. |
+| Message volume | Lowest bucket offered |
+
+**Sample messages** — paste verbatim; these are what the bridge actually sends:
+
+```
+Marlboro Media: 1. Dune: Part Two (2024) [movie]
+2. Dune (2021) [movie]
+Reply 1-2 to request.
+Reply STOP to opt out.
+
+Marlboro Media: Requested Dune: Part Two. You'll get a text when it's on Jellyfin.
+
+Marlboro Media: Dune: Part Two is ready on Jellyfin.
+```
+
+Every outbound text is branded (`BRAND` in `bridge.py`) so a recipient can always tell who is texting them, and the sender identity must match the campaign's `doing_business_as`. The opt-out notice rides on the **first message of a conversation only**, and again if a number goes quiet for 30 days; repeating it every time would burn an SMS segment for no compliance gain.
+
+**Opt-in evidence** — keep the artifacts already published; campaign vetting asks for the same thing:
+
+1. A screenshot of your phone showing *you texting the number first*. That outbound message **is** the consent under consumer-initiated opt-in.
+2. A screenshot of **Monitor → Logs → Messages** showing the inbound message and the `outbound-reply` with its full body.
+3. The consent notice (`services/sms-bridge/OPT-IN.md`), published publicly — see 23.8.
+
+Every URL must load with **no login**. Reviewers will not authenticate, and will not reach anything behind Tailscale.
+
+**Keyword handling changes once a Messaging Service exists.** Twilio's Advanced Opt-Out — which answers `STOP`/`HELP` before the webhook fires — is a Messaging Service feature. On the toll-free setup there was no Service, so every keyword reached the bridge and `bridge.py` had to answer `HELP` itself; without that, "HELP" was treated as a search and replied with movie titles (*Send Help (2026)*, *The Help (2011)*).
+
+With a Messaging Service in place for 10DLC, **verify which side answers** — text `HELP` and count the replies:
+
+- **One reply** → whichever side handled it is fine. If Advanced Opt-Out answered, make its HELP text match `HELP_TEXT` in `bridge.py` so the campaign samples stay accurate.
+- **Two replies** → both sides answered. Either disable Advanced Opt-Out on the Service, or remove `HELP`/`INFO` from `HELP_KEYWORDS`.
+- **No reply** → neither side answered; check the Service's inbound webhook (step 5 in 23.1).
+
+`STOP`, `STOPALL`, `UNSUBSCRIBE`, `CANCEL`, `END`, `QUIT`, `START`, `UNSTOP`, `YES` stay silent in the bridge (HTTP 204, logged) either way. Twilio enforces opt-out account-wide regardless — a send to an opted-out number fails with `21610` — so answering would double up on the platform or contradict it. Carrier-reserved words beat titles, which does mean a film literally called *Cancel* can't be found by exact title. Correct trade.
+
+### 23.3 Point the number at the bridge
+
+**Phone Numbers → Manage → Active numbers →** your number **→ Configure → Messaging**:
+
+- **A message comes in:** Webhook, `HTTPS POST`
+- URL: `https://sms.marlboro-bc.duckdns.org/twilio/inbound`
+
+This URL must match `SMS_BRIDGE_PUBLIC_URL` in `.env` **character for character**. Twilio signs the exact URL it POSTs to, and the bridge — sitting behind NPM, where it only ever sees the internal URL — verifies against the configured value rather than the request headers. A trailing-slash mismatch shows up as every message 403ing with `REJECTED: bad Twilio signature`, which reads like a credentials problem and isn't.
+
+Only `/twilio/inbound` is publicly routable. NPM 404s every other path on that hostname (see `npm_advanced_config` in `setup_services.sh`), so `/seerr/hook` and `/healthz` stay LAN/Tailscale-only despite the public name.
+
+### 23.4 Create the 1Password items
+
+Two items, both created by hand (`setup_script.sh` only warns if they're missing — it can't invent them):
+
+**`Marlboro NAS - Twilio`** — from **Account → API keys & tokens** in the console:
+
+| Field | Value |
+|---|---|
+| `account_sid` | `AC…` |
+| `auth_token` | the account auth token (this is what signs webhooks — treat it as a password) |
+| `from_number` | your 10DLC local number in E.164, e.g. `+15035550142` |
+
+**`Marlboro NAS - SMS Allowlist`** — one field, `allowlist`:
+
+```
++15035550142=bcalegari,+15035550143=mom
+```
+
+Phone in E.164 `=` that person's **Seerr display name**, comma-separated. The name must match a real Seerr user (`http://192.168.0.10:5055/users`) — the bridge matches it against `displayName`, `username`, and `jellyfinUsername`, case-insensitively, because a Jellyfin-linked account carries no `username` at all.
+
+This lives in 1Password rather than the repo because it's household phone numbers — PII that has no business in git history.
+
+**The allowlist is the security boundary.** A number that isn't on it gets no reply of any kind (the bridge returns `204` and logs the attempt), and the bridge will never send a text to a number that isn't on it, even if Seerr asks. That's what stops a public SMS endpoint from becoming a relay someone else can run up your Twilio bill with. `SMS_DAILY_CAP` in `.env` (default 100) is the backstop if that ever fails.
+
+Requests are attributed to the mapped Seerr user, so each person's existing approval permissions and quotas apply unchanged — the bridge makes no approval policy of its own.
+
+### 23.5 Bring it up
+
+```bash
+./setup_script.sh                    # writes the Twilio vars into .env
+docker compose up -d sms-bridge
+./setup_services.sh                  # proxy host + cert + Seerr's webhook agent
+docker logs sms-bridge | tail -5     # should list the allowlist size
+```
+
+Then in Seerr: **Settings → Notifications → Webhook → Test**. `sms-bridge` logs `seerr hook: test notification OK`.
+
+### 23.6 Caveats
+
+- **"Ready" means Seerr noticed, not that the import finished.** Seerr marks media available on its own Jellyfin sync, so expect a few minutes' lag between the file landing and the text.
+- **Requests made in the Seerr web UI still get a text**, as long as that user's display name is in the allowlist — the bridge falls back to `requestedBy_username` when it has no request-id row of its own.
+- Failed and declined requests text too. A request that dies in silence is worse than no bot.
+- Each person is rate-limited to 12 inbound messages an hour, and pick-a-number sessions expire after 15 minutes.
+- Long replies truncate the *body*, never the brand prefix or the opt-out notice, and pad with `...` rather than `…` — one non-GSM-7 character flips the whole message to UCS-2 and halves what fits in a segment.
+
+### 23.7 Verify it works
+
+Run these in order — each isolates a different layer, so the first one that fails tells you where the problem is.
+
+**1. Bridge is alive (on the box):**
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8195/healthz   # 200
+docker logs sms-bridge | tail -3        # should print the allowlist size, no "unset env" warning
+```
+
+**2. DNS resolves to you:**
+
+```bash
+dig +short sms.marlboro-bc.duckdns.org        # your public IP
+curl -s ifconfig.me; echo                     # same IP
+```
+
+**3. Public endpoint, from OFF your network.** Use a laptop on a phone hotspot — not the LAN, and not Tailscale. A double-NAT setup can pass a LAN test and still fail from the internet (see Part 19):
+
+```bash
+curl -s -o /dev/null -w 'inbound  %{http_code}\n' -X POST https://sms.marlboro-bc.duckdns.org/twilio/inbound  # 403
+curl -s -o /dev/null -w 'healthz  %{http_code}\n' https://sms.marlboro-bc.duckdns.org/healthz                 # 404
+curl -s -o /dev/null -w 'hook     %{http_code}\n' -X POST https://sms.marlboro-bc.duckdns.org/seerr/hook      # 404
+```
+
+`403` on the first proves the route is live and signature-gated. `404` on the other two proves the path lockdown holds — those must stay LAN/Tailscale-only.
+
+**4. Text it.** Start with a title **already in the library** — that path replies without creating a request or starting a download, so it exercises the whole loop for free:
+
+```
+you  ->  paprika
+bot  ->  Marlboro Media: Paprika is already on Jellyfin.
+         Reply STOP to opt out.
+```
+
+Watch it land with `docker logs -f sms-bridge`. Then do a real one: text a title you don't have, reply with its number, and confirm in Seerr that the request is attributed to **your user**, not the admin account.
+
+**Troubleshooting:**
+
+| Symptom | Cause |
+|---|---|
+| No log line at all in `sms-bridge` | Twilio never reached you. Check the number's Messaging webhook, and Twilio console → Monitor → Errors |
+| `REJECTED: bad Twilio signature` | `SMS_BRIDGE_PUBLIC_URL` ≠ the webhook URL in Twilio, character for character. Trailing slash counts |
+| `IGNORED: message from non-allowlisted` | Number isn't in the allowlist item, or isn't E.164 |
+| `allowlist name 'x' matches no Seerr user` | Name doesn't match any Seerr `displayName`/`username`/`jellyfinUsername` |
+| Reply never arrives on the handset | Carrier registration incomplete. Twilio console → Monitor → Logs → Messages; `30032` is unverified toll-free, `30034` is unregistered 10DLC, `30007` is carrier filtering |
+| Request created but no "ready" text | Seerr's webhook agent — re-run `./setup_services.sh`, then Settings → Notifications → Webhook → Test |
+
+### 23.8 Publish the opt-in evidence
+
+Carrier registration wants a publicly reachable URL showing the opt-in. `services/sms-bridge/OPT-IN.md` is the consent notice — publish a copy where a reviewer can read it without logging in.
+
+Use the Forgejo already running at `git.marlboro-bc.duckdns.org` (public hostname, no new attack surface):
+
+1. Fill in the three placeholders at the top of `OPT-IN.md` (name, contact, number).
+2. New repo on Forgejo named `sms-optin`, visibility **Public**.
+3. Add the notice as `README.md` so the repo's landing page renders it, plus a screenshot of a real conversation as `optin-screenshot.png`.
+4. Give Twilio both URLs:
+   - `https://git.marlboro-bc.duckdns.org/<user>/sms-optin`
+   - `https://git.marlboro-bc.duckdns.org/<user>/sms-optin/raw/branch/main/optin-screenshot.png`
+5. **Open both in a private window with no session.** If either asks for a login, the reviewer sees nothing and the submission is rejected. This is the most common failure.
+
+Keep that repo limited to the notice and the screenshot — no allowlist, no phone numbers other than the sending number itself.
 
 ---
 

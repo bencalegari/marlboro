@@ -14,7 +14,8 @@
 #                  services/<app>/settings/*.json (quality profile "Any",
 #                  naming, media management, delay profile)
 #   Seerr        — Sonarr/Radarr server link (quality profile + root folder),
-#                  resolved by profile NAME so it survives Profilarr id churn
+#                  resolved by profile NAME so it survives Profilarr id churn;
+#                  plus the webhook notification agent that drives sms-bridge
 #   Prowlarr     — Sonarr/Radarr applications + FlareSolverr indexer proxy
 #   AdGuard      — upstream DNS, rate limit, DNS blocklists (sudo yaml reconcile)
 #   NginxProxyMgr— proxy hosts + Let's Encrypt certs (DNS-01 via DuckDNS) from
@@ -293,6 +294,90 @@ PY
   done
 }
 
+# ─── Seerr: webhook notification agent -> sms-bridge ─────────────────────────
+# Fires the "it's ready" half of the SMS bridge. Seerr POSTs to sms-bridge, which
+# looks the request id up in its SQLite map and texts whoever asked for it.
+#
+# Types is a bitmask of Notification (server/lib/notifications/index.ts):
+#   MEDIA_AVAILABLE 8 | MEDIA_FAILED 16 | TEST_NOTIFICATION 32 | MEDIA_DECLINED 64
+# = 120. FAILED/DECLINED are included on purpose — a request that dies in silence is
+# worse than no bot at all. TEST is included so the UI's Test button reaches the bridge.
+#
+# jsonPayload goes over the wire as a PLAIN JSON string; Seerr JSON.stringify's and
+# base64's it server-side, and GET hands it back decoded (routes/settings/
+# notifications.ts:276-325). So we send and diff the raw template, not base64.
+#
+# The "{{request}}" key is Seerr's own convention: it becomes "request", or null when
+# the event carries no request. Don't "fix" it into a plain "request" key.
+SMS_HOOK_URL="http://sms-bridge:8080/seerr/hook"
+SMS_HOOK_TYPES=120
+
+configure_sms_bridge() {
+  log "Seerr: webhook notification agent → sms-bridge"
+  [ -f "$SEERR_SETTINGS" ] || { warn "  settings.json missing — Seerr not initialized yet, skipping"; return; }
+  local key secret
+  key=$(seerr_key)
+  [ -n "$key" ] || { warn "  Seerr API key unreadable in settings.json — skipping"; return; }
+  secret=$(getenv SMS_BRIDGE_HOOK_SECRET)
+  [ -n "$secret" ] || { warn "  SMS_BRIDGE_HOOK_SECRET blank in .env — run setup_script.sh first, skipping"; return; }
+  up "$SEERR/api/v1/status" || { warn "  Seerr unreachable on :5055 — skipping"; return; }
+
+  python3 - "$SEERR" "$key" "$SMS_HOOK_URL" "$SMS_HOOK_TYPES" "$secret" <<'PY'
+import sys, json, urllib.request, urllib.error
+base, key, hook_url, types, secret = sys.argv[1:6]
+types = int(types)
+
+template = json.dumps({
+    "notification_type": "{{notification_type}}",
+    "subject": "{{subject}}",
+    "media_type": "{{media_type}}",
+    "tmdbId": "{{media_tmdbid}}",
+    "{{request}}": {
+        "request_id": "{{request_id}}",
+        "requestedBy_username": "{{requestedBy_username}}",
+    },
+}, indent=2)
+
+def req(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    r = urllib.request.Request(f"{base}/api/v1/settings/notifications/{path}", data=data,
+                               method=method,
+                               headers={"X-Api-Key": key, "Content-Type": "application/json"})
+    raw = urllib.request.urlopen(r).read()
+    return json.loads(raw) if raw else {}
+
+try:
+    cur = req("GET", "webhook")
+except urllib.error.HTTPError as e:
+    print(f"  GET webhook settings failed ({e.code}) — skipping"); sys.exit(0)
+
+opts = cur.get("options") or {}
+desired_auth = f"Bearer {secret}"
+if (cur.get("enabled") is True and cur.get("types") == types
+        and opts.get("webhookUrl") == hook_url and opts.get("authHeader") == desired_auth
+        and opts.get("jsonPayload") == template):
+    print("  webhook agent already matches"); sys.exit(0)
+
+body = {
+    "enabled": True,
+    "types": types,
+    "embedPoster": cur.get("embedPoster", False),
+    "options": {
+        "webhookUrl": hook_url,
+        "jsonPayload": template,
+        "authHeader": desired_auth,
+        "customHeaders": opts.get("customHeaders") or [],
+        "supportVariables": False,
+    },
+}
+try:
+    req("POST", "webhook", body)
+except urllib.error.HTTPError as e:
+    print(f"  POST webhook settings failed ({e.code}): {e.read()[:200].decode('replace')}"); sys.exit(0)
+print(f"  webhook agent → {hook_url} (types {types}), auth header set")
+PY
+}
+
 # ─── Prowlarr: apps + FlareSolverr proxy ─────────────────────────────────────
 ensure_prowlarr_app() {
   local appname="$1" syncbase="$2" appkey="$3"
@@ -413,10 +498,12 @@ PY
 # Creates missing cert + host, skips existing (manual tweaks survive). NPM must
 # be up on :81 with its admin creds set; cert issuance needs DuckDNS reachable.
 #
-# Format: domain | forward_host | forward_port | websockets | ssl_forced
+# Format: domain | forward_host | forward_port | websockets | ssl_forced [| snippet]
 # Host-networked / host-published services (Jellyfin, Plex, Coolify, the apex)
 # are reached via the LAN IP; bridge services by container name. Keep in sync
 # when exposing a new service externally.
+#
+# The optional 6th field names an nginx snippet from npm_advanced_config below.
 NPM_HOSTS=(
   "marlboro-bc.duckdns.org|192.168.0.10|8096|true|true"        # apex → Jellyfin
   "jellyfin.marlboro-bc.duckdns.org|192.168.0.10|8096|true|false"
@@ -424,7 +511,43 @@ NPM_HOSTS=(
   "seerr.marlboro-bc.duckdns.org|seerr|5055|true|false"
   "git.marlboro-bc.duckdns.org|forgejo|3000|true|false"
   "coolify.marlboro-bc.duckdns.org|192.168.0.10|8000|true|true"
+  "sms.marlboro-bc.duckdns.org|sms-bridge|8080|false|true|sms-inbound-only"
 )
+
+# Optional per-host nginx snippet, selected by the 6th NPM_HOSTS field.
+#
+# NPM omits its own default "location /" block whenever advanced_config contains the
+# string "location" — so a snippet that opens one MUST supply the proxy_pass itself.
+# That is exactly what we want here: sms-bridge exposes /twilio/inbound (Twilio),
+# /seerr/hook (shared secret) and /healthz, and only the first has any business being
+# on the public internet. Everything else 404s at the edge, so the hook and health
+# endpoints stay LAN/tailnet-only even though the hostname is public.
+npm_advanced_config() {
+  case "$1" in
+    sms-inbound-only) cat <<'NGINX'
+location = /twilio/inbound {
+    # Resolve the upstream at REQUEST time, not config-load time: a literal
+    # proxy_pass hostname makes nginx refuse to start when the container is down,
+    # which would take every other proxy host (Jellyfin included) with it. Via a
+    # variable + Docker's embedded DNS, a dead sms-bridge is just a 502 here.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set $sms_upstream sms-bridge;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Scheme $scheme;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_pass http://$sms_upstream:8080;
+}
+location / {
+    return 404;
+}
+NGINX
+      ;;
+    *) : ;;
+  esac
+}
 
 # Helpers use script-level NPM_AUTH / NPM_CERTS / NPM_PHOSTS set in configure_proxy_hosts.
 npm_cert_id_for() { echo "$NPM_CERTS" | jq -r --arg d "$1" '[.[]|select(.domain_names|index($d))][0].id // empty'; }
@@ -460,19 +583,20 @@ configure_proxy_hosts() {
   NPM_CERTS=$(curl -s -m10 "${NPM_AUTH[@]}" "$NPM/api/nginx/certificates")
   NPM_PHOSTS=$(curl -s -m10 "${NPM_AUTH[@]}" "$NPM/api/nginx/proxy-hosts")
 
-  local fails=0 row domain fhost fport ws sslf cid body resp
+  local fails=0 row domain fhost fport ws sslf snip adv cid body resp
   for row in "${NPM_HOSTS[@]}"; do
-    IFS='|' read -r domain fhost fport ws sslf <<<"$row"
+    IFS='|' read -r domain fhost fport ws sslf snip <<<"$row"
     if npm_host_exists "$domain"; then log "  proxy host $domain exists"; continue; fi
+    adv=""; [ -n "${snip:-}" ] && adv=$(npm_advanced_config "$snip")
     cid=$(npm_ensure_cert "$domain")
     [ -n "$cid" ] || { warn "  skipping $domain — no certificate"; fails=$((fails+1)); continue; }
     body=$(jq -n --arg d "$domain" --arg fh "$fhost" --argjson fp "$fport" \
-      --argjson ws "$ws" --argjson sslf "$sslf" --argjson cid "$cid" \
+      --argjson ws "$ws" --argjson sslf "$sslf" --argjson cid "$cid" --arg adv "$adv" \
       '{domain_names:[$d],forward_scheme:"http",forward_host:$fh,forward_port:$fp,
         certificate_id:$cid,ssl_forced:$sslf,http2_support:true,
         allow_websocket_upgrade:$ws,block_exploits:true,caching_enabled:false,
         hsts_enabled:false,hsts_subdomains:false,access_list_id:0,
-        advanced_config:"",locations:[],meta:{}}')
+        advanced_config:$adv,locations:[],meta:{}}')
     resp=$(curl -s -m15 -X POST "$NPM/api/nginx/proxy-hosts" "${NPM_AUTH[@]}" -H 'Content-Type: application/json' -d "$body")
     if echo "$resp" | jq -e '.id' >/dev/null 2>&1; then
       log "  created proxy host $domain → $fhost:$fport (cert $cid)"
@@ -488,6 +612,7 @@ configure_qbit
 configure_arr "Sonarr" "$SONARR" "$SONARR_KEY" "tv-sonarr" "/data/media/tv"     "$SCRIPT_DIR/services/sonarr/settings"
 configure_arr "Radarr" "$RADARR" "$RADARR_KEY" "radarr"    "/data/media/movies"  "$SCRIPT_DIR/services/radarr/settings"
 configure_seerr
+configure_sms_bridge
 configure_prowlarr
 configure_adguard
 configure_proxy_hosts

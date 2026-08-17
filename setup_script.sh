@@ -104,6 +104,10 @@ ensure_password "Marlboro NAS - Forgejo"                  "ben"
 # Samba/SMB — password synced into smbpasswd by configure_samba (host file share).
 ensure_password "Marlboro NAS - Samba"                    "bcalegari"
 
+# SMS bridge — shared secret Seerr presents on its webhook to sms-bridge. Generated
+# here; setup_services.sh writes the matching Authorization header into Seerr.
+ensure_secret   "Marlboro NAS - SMS Bridge"               "sms-bridge" "$(openssl rand -hex 32)"
+
 # DuckDNS token must be created manually — just warn if missing
 if ! op item get "Marlboro NAS - DuckDNS" --vault "$VAULT" &>/dev/null; then
   log "WARNING: 'Marlboro NAS - DuckDNS' not found in 1Password — DUCKDNS_TOKEN will be blank"
@@ -126,6 +130,20 @@ fi
 for item in "Marlboro NAS - Sonarr" "Marlboro NAS - Radarr" "Marlboro NAS - Tailscale" "Marlboro NAS - Speedtest Tracker"; do
   if ! op item get "$item" --vault "$VAULT" &>/dev/null; then
     log "WARNING: '$item' not found in 1Password — Glance widget will be blank until you add it"
+  fi
+done
+
+# Twilio credentials + the SMS allowlist must be created manually (they come from the
+# Twilio console and from asking people for their phone number) — just warn if missing.
+# The allowlist lives in 1Password rather than the repo on purpose: it is household
+# phone numbers, i.e. PII that has no business in git history.
+#   Marlboro NAS - Twilio       fields: account_sid, auth_token, from_number
+#   Marlboro NAS - SMS Allowlist field:  allowlist
+#     value format: +15035550142=bcalegari,+15035550143=mom
+#     (E.164 phone = Seerr display name — see README "SMS Requests")
+for item in "Marlboro NAS - Twilio" "Marlboro NAS - SMS Allowlist"; do
+  if ! op item get "$item" --vault "$VAULT" &>/dev/null; then
+    log "WARNING: '$item' not found in 1Password — SMS bridge will accept nothing until you add it"
   fi
 done
 
@@ -182,6 +200,18 @@ SPEEDTEST_TRACKER_API_TOKEN=$(pull_field "Marlboro NAS - Speedtest Tracker" api_
 # Consumed by the Glance "releases" widget. All tracked repos are public, so a
 # read-only PAT lifts GitHub's anonymous 60/hr rate limit to 5000/hr.
 GITHUB_TOKEN=$(pull_field "github.com" token)
+# ── SMS bridge (see README "SMS Requests") ──
+TWILIO_ACCOUNT_SID=$(pull_field "Marlboro NAS - Twilio" account_sid)
+TWILIO_AUTH_TOKEN=$(pull_field "Marlboro NAS - Twilio" auth_token)
+TWILIO_FROM_NUMBER=$(pull_field "Marlboro NAS - Twilio" from_number)
+SMS_ALLOWLIST=$(pull_field "Marlboro NAS - SMS Allowlist" allowlist)
+SMS_BRIDGE_HOOK_SECRET=$(pull_field "Marlboro NAS - SMS Bridge" password)
+# Twilio signs the PUBLIC url it POSTs to. sms-bridge sits behind NPM and only ever
+# sees the internal one, so signature verification uses this value verbatim — it must
+# match the Messaging webhook configured on the Twilio number, character for character.
+SMS_BRIDGE_PUBLIC_URL=https://sms.marlboro-bc.duckdns.org/twilio/inbound
+# Hard ceiling on outbound texts per rolling 24h. Bounds worst-case Twilio spend.
+SMS_DAILY_CAP=100
 EOF
 
 chmod 600 "$ENV_FILE"
@@ -740,6 +770,15 @@ configure_samba() {
   done
 
   # smb.conf — SMB3-only + opportunistic encryption; vfs_fruit for macOS Finder.
+  #
+  # NOTE: the heredoc below has an UNQUOTED delimiter, because it interpolates
+  # WORKGROUP and SMB_USER. So backtick and dollar syntax inside it is live shell
+  # syntax — including on smb.conf comment lines. Two rules when editing it:
+  #   - no backticks in the smb.conf comments (use 'single quotes'); a backtick pair
+  #     gets executed as a command substitution
+  #   - never name a variable that isn't set; under 'set -u' an unset one aborts the
+  #     whole script during expansion, before tee ever runs
+  # Both of those bit this function once already.
   log "  writing /etc/samba/smb.conf"
   sudo tee /etc/samba/smb.conf >/dev/null <<EOF
 #
@@ -754,13 +793,13 @@ configure_samba() {
    passdb backend = tdbsam
 
    # Access fence by source subnet: LAN + Tailscale (v4 100.64/10, v6 all-ULA
-   # fc00::/7 covers tailnet + LAN ULA) + loopback. NOT `bind interfaces only`
+   # fc00::/7 covers tailnet + LAN ULA) + loopback. NOT 'bind interfaces only'
    # — that can't serve Tailscale (its point-to-point TUN is dropped by Samba's
    # interface matching), so smbd binds all addresses and we deny by source
    # instead. Docker bridges (172.16/12) aren't in the allow-list → denied.
    # (allow wins over deny; every connection is still auth-gated + SMB3.)
    hosts allow = 127.0.0.0/8 192.168.0.0/24 100.64.0.0/10 fc00::/7 ::1
-   hosts deny = 0.0.0.0/0 ::/0${TS_ADDRS}
+   hosts deny = 0.0.0.0/0 ::/0
 
    # Modern, encrypted transport only.
    server min protocol = SMB3_00

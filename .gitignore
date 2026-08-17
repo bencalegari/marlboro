@@ -37,6 +37,15 @@ services/ntfy/*
 services/ntfy/config/*
 !services/ntfy/config/server.yml
 
+# Exception: the SMS bridge script + its opt-in notice are things we author. The
+# SQLite session/dedupe DB under services/sms-bridge/data/ is runtime state — ignored.
+!services/sms-bridge/
+services/sms-bridge/*
+!services/sms-bridge/bridge.py
+!services/sms-bridge/OPT-IN.md
+!services/sms-bridge/site/
+!services/sms-bridge/site/*
+
 # Media & downloads
 media/
 downloads/
