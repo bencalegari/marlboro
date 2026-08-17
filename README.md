@@ -704,7 +704,20 @@ Repeat in Sonarr.
 
 Profilarr syncs quality profiles + custom formats from the Dictionarry database (`Dictionarry-Hub/database`, branch `v2`) into Sonarr/Radarr. This stack runs Profilarr **v2** (image `ghcr.io/dictionarry-hub/profilarr`, pinned by `tag@sha256` digest in `docker-compose.yml`). v2 is a rewrite: new PCD 2.0 database format, mandatory login, and a database moved off the abandoned `santiagosayshey` Docker Hub image.
 
-**Current config:** the **`2160p Quality`** profile is synced to both apps and every movie/series is assigned to it (upgrades on → chases the best 4K release via Dictionarry's custom-format scoring, not just the highest tier). Delay profiles differ by app on purpose:
+**Current config:** movies and TV deliberately run **different profiles**.
+
+| App | Profile synced | Assigned to | Ceiling |
+|---|---|---|---|
+| Radarr | `2160p Quality` **+** `2160p Remux` | all monitored movies → `2160p Remux` | lossless `Remux-2160p` / `Remux-1080p` (`2160p Remux` custom format `+980000`) |
+| Sonarr | `2160p Quality` only | all series | `Bluray-2160p` re-encodes (`Remux` custom format is banned at `-999999`) |
+
+Why the split: a 4K HDR remux runs 60–80 Mbps and always forces an HDR→SDR tone-map on the webOS path, and the UHD 630 is already at its limit doing that (Part 16.5). Worth it for a film you sat down to watch; not worth it × 300 episodes at 15–30 GB each. **Both** profiles ban full discs, so neither can pull an unplayable ISO.
+
+`2160p Quality` stays ticked in Profilarr alongside `2160p Remux` on purpose — untick it and the next Sync would delete it from Radarr, orphaning anything still assigned to it.
+
+Upgrades are on in both, so they chase the best release via Dictionarry's custom-format scoring rather than just the highest tier. Note this is **format-score** driven: existing files sit at 860k–985k against `cutoffFormatScore=1000000`, which is *not* reported as "cutoff unmet" (the quality group counts SDTV→Remux-2160p as equivalent), so switching to `2160p Remux` does **not** trigger a mass re-download — better releases just get picked up opportunistically via RSS.
+
+Delay profiles differ by app on purpose:
 
 - **Sonarr — torrent delay `0`**: grab the first qualifying release the moment an episode airs, then upgrade continuously via RSS as better releases seed.
 - **Radarr — torrent delay `360` (6h)**: no rush on a film, so wait for the best release before grabbing (Dictionarry's default).
@@ -719,8 +732,23 @@ Profilarr syncs quality profiles + custom formats from the Dictionarry database 
    - Radarr → **torrent delay `360`** (6h — Dictionarry's default)
 
    v2's change layer keeps these as local overrides — they survive Dictionarry DB updates. Each delay profile also has a **Bypass if above custom-format score** option: grab immediately (skip the delay) when a release scores over a threshold. Optional — handy on Radarr so a genuinely top-tier release doesn't sit through the full 6h wait.
-5. **Per instance → Sync**: tick **only** `2160p Quality`, select the matching delay profile (Radarr/Sonarr — mandatory), then **Sync**. Profilarr is now the single source of truth for both; re-syncing reproduces exactly these values (no drift to manage).
-6. In each arr, assign your library to `2160p Quality` (Sonarr *series editor* / Radarr *movie editor*, bulk).
+5. **Per instance → Sync**: tick `2160p Quality` **and** `2160p Remux` on Radarr, `2160p Quality` only on Sonarr; select the matching delay profile (Radarr/Sonarr — mandatory), then **Sync**. Profilarr is now the single source of truth for both; re-syncing reproduces exactly these values (no drift to manage).
+6. In each arr, assign your library (Sonarr *series editor* / Radarr *movie editor*, bulk) — Radarr movies to `2160p Remux`, Sonarr series to `2160p Quality`.
+
+> **Driving the sync page without the UI.** The selection is stored in `arr_sync_quality_profiles` (`instance_id`, `database_id`, `profile_name`) in `services/profilarr/config/data/profilarr.db`. Don't write that table directly on a running container — go through the same SvelteKit form actions the page uses. `local_bypass_enabled=1` means no login is needed from the LAN, but SvelteKit rejects the POST without an `Origin` header:
+>
+> ```bash
+> # instance 1 = Radarr, 2 = Sonarr; database_id 1 = Dictionarry
+> curl -sS -X POST "http://localhost:6868/arr/1/sync?/saveQualityProfiles" \
+>   -H 'Origin: http://localhost:6868' \
+>   --data-urlencode 'selections=[{"databaseId":1,"profileName":"2160p Quality"},{"databaseId":1,"profileName":"2160p Remux"}]' \
+>   --data-urlencode 'trigger=on_pull' --data-urlencode 'cron=0 0 * * *'
+>
+> curl -sS -X POST "http://localhost:6868/arr/1/sync?/syncQualityProfiles" \
+>   -H 'Origin: http://localhost:6868' --data-urlencode 'x=1'
+> ```
+>
+> Without the `Origin` header it returns `Cross-site POST form submissions are forbidden`. The sibling actions are `saveDelayProfiles`/`syncDelayProfiles` and `saveMediaManagement`/`syncMediaManagement`.
 
 > **Resurrect gotcha:** a Sync pushes **only the profiles you tick**. Tick just the one you want — if you select a profile and later delete it in Sonarr/Radarr, the next Sync re-creates it. Starting from a clean v2 install (nothing selected) is the moment to avoid this permanently.
 
@@ -941,6 +969,31 @@ Then on each client, lower **Home network quality** below the source bitrate (e.
 > **Why not commit `encoding.xml`?** Jellyfin rewrites it whenever any dashboard setting changes (subtitles, deinterlacing, etc.), so tracking it creates constant noise diffs. It's gitignored under `services/*`. Re-apply the settings above on a fresh install.
 
 > **Verify transcoding is using the GPU:** during playback, `docker logs jellyfin --tail 50` should show ffmpeg invoked with `-hwaccel qsv` and `vpp_qsv` / `tonemap_vaapi` filters. `intel_gpu_top` on the host (from `intel-gpu-tools`) shows live engine utilization.
+
+> **No BluRay ISOs or disc folders in the library.** Jellyfin reads `.iso` / `BDMV` / `VIDEO_TS` through libbluray (`-f mpegts -i bluray:"…"`), which breaks playback in ways that look like a performance problem but aren't — the transcode runs at 40×+ realtime while the client stutters, hard-stops, or seeks backward in a loop. Three causes stack: (1) libbluray often can't build a seek index (`bluray.c:299: … no timestamp for SPN 0`), so every seek is a blind `-ss -noaccurate_seek` guess and HLS segment numbers stop matching their content; (2) BluRay m2ts timestamps start at an arbitrary offset (`Duration: 01:23:33, start: 4198.000000`) which, fed through `-copyts -avoid_negative_ts disabled`, leaves the player correcting a mismatch it can never resolve; (3) multi-clip playlists change stream layout mid-file (`New audio stream with index 9 at pos:…`) while `-map 0:1` was fixed at launch. Discs with several equal-length playlists are worse — libbluray picks one arbitrarily and it may not be the right cut.
+>
+> Fix is a lossless remux of the main playlist to MKV — no re-encode, keeps DTS-HD MA and PGS subs, and drops the menus/extras (a 16 GB ISO became an 11 GB MKV). Pick the playlist from the `usable playlists` list ffmpeg prints, matching the known runtime:
+>
+> ```bash
+> docker exec jellyfin /usr/lib/jellyfin-ffmpeg/ffmpeg -playlist 1 \
+>   -i "bluray:/media/movies/<Title>/<file>.iso" \
+>   -map 0:v:0 -map 0:a -map 0:s -c copy -fflags +genpts \
+>   -f matroska "/media/<Title>.mkv"
+> ```
+>
+> Verify with `ffprobe -show_entries format=start_time,duration` — `start_time` must be `0.000000` and `duration` must match the source runtime. **Chapters are lost** (libbluray playlist marks don't survive the mpegts demuxer); re-add them with a chapter-aware tool if they matter.
+>
+> **How discs are kept out of the library.** Three layers, all in `setup_services.sh` / tracked settings — nothing to click:
+>
+> | Layer | Where | Effect |
+> |---|---|---|
+> | `BR-DISK` + `Raw-HD` disallowed | `services/{radarr,sonarr}/settings/quality-profile-any.json` | Radarr parses full discs as quality `BR-DISK`, so this is a hard reject on the `Any` profile |
+> | `Full Disc` / `Full Disc (Quality Match)` scored `-999999` | Dictionarry/Profilarr `2160p Quality` **and** `2160p Remux` profiles (`minFormatScore=200000`) | Anything matching scores far below the floor and can never be grabbed. Neither profile lists `BR-DISK` or `Raw-HD` as a selectable quality either |
+> | `Block full-disc releases` release profile | `services/sonarr/settings/releaseprofile-nodisc.json` | **Sonarr has no `BR-DISK` quality at all** — a `COMPLETE.BLURAY` TV release misparses as plain `Bluray-1080p` and bypasses the quality filter entirely, so it has to be blocked on release title |
+>
+> The two ISOs that got in (`Baboon Heart`, `The Witch`) were auto-grabbed from IPTorrents in May/June 2026 while assigned to a quality profile that still allowed `BR-DISK`. Seerr is bound by profile **name** in `configure_seerr` (`SEERR_PROFILE_RADARR` / `SEERR_PROFILE_SONARR`), so it can't drift onto an unguarded profile again — but anything added directly in Radarr/Sonarr lands on `Any`, which is why `BR-DISK`/`Raw-HD` had to be turned off there too.
+>
+> **Gotcha that hid this for weeks:** a quality-profile `PUT` must carry *every* custom format currently in the *arr and no extras, or it 400s with `All Custom Formats and no extra ones need to be present inside your Profile!`. Profilarr adds and renames Dictionarry formats over time (this stack's `Any` profile went 163 → 164 formats mid-session just from syncing one new profile), so a stored `formatItems` list goes stale and the `BR-DISK` fix silently stopped applying — `setup_services.sh` was discarding the response body and only logging a generic warning. `apply_settings_json` now reports the validation error, and `configure_arr` re-keys the tracked scores onto the **live** format roster before PUTting, so the tracked file stays the source of truth for intent while the server decides the roster.
 
 ---
 

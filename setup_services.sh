@@ -124,12 +124,47 @@ ensure_root_folder() {
   fi
 }
 
+# Sonarr-only: block full-disc releases by title. Sonarr has no BR-DISK quality
+# (Radarr does), so a COMPLETE.BLURAY release misparses as plain Bluray-1080p and
+# slips straight past the quality filter. A release profile is the only lever.
+# Matched by name so re-runs converge instead of stacking duplicates.
+ensure_release_profile() {
+  local base="$1" key="$2" file="$3"
+  [ -f "$file" ] || { warn "  $(basename "$file") missing — skipping"; return; }
+  local name; name=$(jq -r '.name' "$file")
+  local id; id=$(arr_get "$base" "$key" "/api/v3/releaseprofile" \
+    | jq -r --arg n "$name" '[.[]|select(.name==$n)][0].id // empty')
+  if [ -n "$id" ]; then
+    local t; t=$(mktemp)
+    jq --argjson i "$id" '.id=$i' "$file" > "$t"
+    arr_put "$base" "$key" "/api/v3/releaseprofile/$id" "@$t" >/dev/null 2>&1 \
+      && log "  release profile '$name' updated" || warn "  failed updating release profile '$name'"
+    rm -f "$t"
+  else
+    arr_post "$base" "$key" "/api/v3/releaseprofile" "$(cat "$file")" >/dev/null 2>&1 \
+      && log "  release profile '$name' created" || warn "  failed creating release profile '$name'"
+  fi
+}
+
 # Apply a tracked settings JSON (singleton config endpoints) if present.
+# arg5 optional: label to report instead of the (possibly temp) filename.
+# Surfaces the *arr's validation body on failure — swallowing it hid a stale
+# quality-profile formatItems list that had silently stopped applying.
 apply_settings_json() {
-  local base="$1" key="$2" endpoint="$3" file="$4"
+  local base="$1" key="$2" endpoint="$3" file="$4" label="${5:-$(basename "$4")}"
   [ -f "$file" ] || { warn "  $file missing — skipping"; return; }
-  arr_put "$base" "$key" "$endpoint" "@$file" >/dev/null 2>&1 \
-    && log "  applied $(basename "$file")" || warn "  failed applying $(basename "$file")"
+  # Deliberately not curl -fsS / arr_put: -f discards the response body, which is
+  # where the *arr puts its validation errors.
+  local resp code body
+  resp=$(curl -sS -m15 -X PUT -H "X-Api-Key: $key" -H 'Content-Type: application/json' \
+           --data-binary "@$file" -w $'\n%{http_code}' "$base$endpoint" 2>&1)
+  code=${resp##*$'\n'}; body=${resp%$'\n'*}
+  case "$code" in
+    2*) log "  applied $label" ;;
+    *)  warn "  failed applying $label (HTTP $code): $(printf '%s' "$body" | jq -r '
+          if type=="array" then [.[]|"\(.propertyName // "?"): \(.errorMessage // .)"]|join("; ")
+          else (.message // .) end' 2>/dev/null | head -c 300)" ;;
+  esac
 }
 
 configure_arr() {
@@ -143,11 +178,35 @@ configure_arr() {
   apply_settings_json "$base" "$key" "/api/v3/config/naming"          "$sdir/naming.json"
   apply_settings_json "$base" "$key" "/api/v3/config/mediamanagement" "$sdir/mediamanagement.json"
   # Quality profile "Any" (id in the file) + delay profile (list → id 1).
+  # Note: BR-DISK (Radarr) and Raw-HD are OFF in the tracked "Any" profiles —
+  # full BluRay discs are unplayable through Jellyfin's libbluray path. See the
+  # BluRay ISO caveat in README Part 16.5.
+  #
+  # The formatItems list must contain EVERY custom format currently in the *arr
+  # and no extras, or the PUT 400s with "All Custom Formats and no extra ones
+  # need to be present inside your Profile!". Profilarr adds/renames Dictionarry
+  # formats over time, so a stored list goes stale and silently stops applying.
+  # Re-key the tracked scores onto the live format list before PUTting: the file
+  # stays the source of truth for intent, the live server decides the roster.
   if [ -f "$sdir/quality-profile-any.json" ]; then
     local qpid; qpid=$(jq -r '.id' "$sdir/quality-profile-any.json")
-    arr_put "$base" "$key" "/api/v3/qualityprofile/$qpid" "@$sdir/quality-profile-any.json" >/dev/null 2>&1 \
-      && log "  applied quality-profile-any.json" || warn "  failed applying quality profile"
+    local live merged; live=$(mktemp); merged=$(mktemp)
+    if arr_get "$base" "$key" "/api/v3/qualityprofile/$qpid" > "$live" 2>/dev/null; then
+      jq --slurpfile l "$live" '
+        ([.formatItems[]? | {key: .name, value: .score}] | from_entries) as $want
+        | .formatItems = [ $l[0].formatItems[] | .score = ($want[.name] // 0) ]
+      ' "$sdir/quality-profile-any.json" > "$merged"
+      apply_settings_json "$base" "$key" "/api/v3/qualityprofile/$qpid" "$merged" \
+        "quality-profile-any.json"
+    else
+      warn "  could not read live quality profile $qpid — skipping"
+    fi
+    rm -f "$live" "$merged"
   fi
+  # Sonarr only (Radarr has no release profiles — it uses Custom Formats, and
+  # Dictionarry already scores "Full Disc" at -999999 in the 2160p profile).
+  [ -f "$sdir/releaseprofile-nodisc.json" ] \
+    && ensure_release_profile "$base" "$key" "$sdir/releaseprofile-nodisc.json"
   if [ -f "$sdir/delayprofile.json" ]; then
     local dp; dp=$(mktemp)
     jq '.[0]' "$sdir/delayprofile.json" > "$dp"
@@ -166,10 +225,22 @@ configure_arr() {
 # exist" / "Root folder '/tv' does not exist". Reconcile the link here.
 #
 # Resolve the profile by NAME (not id): Profilarr sync churns profile ids, so a
-# hardcoded id is exactly what broke. SEERR_PROFILE is the live Profilarr-managed
-# profile — change it here if you want requests to use a different one.
+# hardcoded id is exactly what broke. These are live Profilarr-managed profiles —
+# change them here if you want requests to use different ones.
+#
+# Movies and TV deliberately differ. Both Dictionarry profiles ban full discs
+# ("Full Disc" / "Full Disc (Quality Match)" at -999999, and neither lists
+# BR-DISK or Raw-HD as a quality at all), so neither can pull an unplayable ISO —
+# see the BluRay ISO caveat in README Part 16.5. The difference is the ceiling:
+#   2160p Remux   — allows Remux-2160p/1080p, i.e. lossless. ~40-60GB per movie.
+#   2160p Quality — caps at Bluray-2160p re-encodes and bans the Remux format
+#                   (-999999). ~15-30GB per TV episode at remux, which is not
+#                   worth it: 4K HDR remuxes at 60-80 Mbps always force an
+#                   HDR->SDR tonemap on the webOS path, and the UHD 630 is
+#                   already at its limit doing that (see Part 16.5).
 SEERR_SETTINGS="$SCRIPT_DIR/services/jellyseerr/config/settings.json"
-SEERR_PROFILE="2160p Quality"
+SEERR_PROFILE_RADARR="2160p Remux"
+SEERR_PROFILE_SONARR="2160p Quality"
 
 # Read Seerr's API key from its own settings.json (no separate 1Password item).
 seerr_key() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["main"]["apiKey"])' "$SEERR_SETTINGS" 2>/dev/null; }
@@ -183,14 +254,14 @@ configure_seerr() {
   local key; key=$(seerr_key)
   [ -n "$key" ] || { warn "  Seerr API key unreadable in settings.json — skipping"; return; }
   up "$SEERR/api/v1/status" || { warn "  Seerr unreachable on :5055 — skipping"; return; }
-  local spec kind base arrkey root pid
-  for spec in "sonarr|$SONARR|$SONARR_KEY|/data/media/tv" \
-              "radarr|$RADARR|$RADARR_KEY|/data/media/movies"; do
-    IFS='|' read -r kind base arrkey root <<<"$spec"
+  local spec kind base arrkey root profile pid
+  for spec in "sonarr|$SONARR|$SONARR_KEY|/data/media/tv|$SEERR_PROFILE_SONARR" \
+              "radarr|$RADARR|$RADARR_KEY|/data/media/movies|$SEERR_PROFILE_RADARR"; do
+    IFS='|' read -r kind base arrkey root profile <<<"$spec"
     [ -n "$arrkey" ] || { warn "  $kind: arr API key blank — skipping"; continue; }
-    pid=$(arr_profile_id "$base" "$arrkey" "$SEERR_PROFILE")
-    [ -n "$pid" ] || { warn "  $kind: profile '$SEERR_PROFILE' not in $kind — sync it in Profilarr, then re-run"; continue; }
-    python3 - "$SEERR" "$key" "$kind" "$pid" "$SEERR_PROFILE" "$root" <<'PY'
+    pid=$(arr_profile_id "$base" "$arrkey" "$profile")
+    [ -n "$pid" ] || { warn "  $kind: profile '$profile' not in $kind — sync it in Profilarr, then re-run"; continue; }
+    python3 - "$SEERR" "$key" "$kind" "$pid" "$profile" "$root" <<'PY'
 import sys, json, urllib.request, urllib.error
 base, key, kind, pid, pname, root = sys.argv[1:7]
 pid = int(pid); is_anime = (kind == "sonarr")   # Radarr has no anime fields

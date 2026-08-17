@@ -1,0 +1,14 @@
+{
+  "name": "Block full-disc releases",
+  "enabled": true,
+  "required": [],
+  "ignored": [
+    "/\\bCOMPLETE[. _](UHD[. _])?BLU-?RAY\\b/",
+    "/\\bFULL[. _]BLU-?RAY\\b/",
+    "/\\bBDMV\\b/",
+    "/\\bBD(25|50|66|100)\\b/",
+    "/\\bVIDEO_TS\\b/"
+  ],
+  "indexerId": 0,
+  "tags": []
+}
