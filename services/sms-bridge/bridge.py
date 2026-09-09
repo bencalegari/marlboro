@@ -412,6 +412,11 @@ def fmt_choice(i, c):
     return f"{i}. {title}{year} [{kind}]"
 
 
+def pick_range(n):
+    """'1' for a single choice, '1-3' for several — 'Reply 1-1' reads like a typo."""
+    return "1" if n == 1 else f"1-{n}"
+
+
 def handle_text(phone, name, text):
     """Returns the reply body, or None to stay silent."""
     text = (text or "").strip()
@@ -433,7 +438,7 @@ def handle_text(phone, name, text):
             return "That pick expired. Text a title to search again."
         idx = int(text)
         if not 1 <= idx <= len(choices):
-            return f"Pick 1-{len(choices)}, or text a title to search again."
+            return f"Pick {pick_range(len(choices))}, or text a title to search again."
         return do_request(phone, name, choices[idx - 1])
 
     try:
@@ -451,7 +456,7 @@ def handle_text(phone, name, text):
 
     put_session(phone, choices)
     lines = [fmt_choice(i, c) for i, c in enumerate(choices, 1)]
-    return "\n".join(lines) + f"\nReply 1-{len(choices)} to request."
+    return "\n".join(lines) + f"\nReply {pick_range(len(choices))} to request."
 
 
 def do_request(phone, name, choice):
