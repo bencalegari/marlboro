@@ -631,16 +631,16 @@ pages:
 
           # ── Internet Speed (speedtest-tracker, glanceapp/community-widgets)
           - type: custom-api
-            cache: 1h
+            cache: 30m
             title: Internet Speed
             title-url: ${SPEEDTEST_URL}
-            url: ${SPEEDTEST_URL}/api/v1/results/latest
+            url: http://speedtest-tracker/api/v1/results/latest
             headers:
               Authorization: Bearer ${SPEEDTEST_TRACKER_API_TOKEN}
               Accept: application/json
             subrequests:
               stats:
-                url: ${SPEEDTEST_URL}/api/v1/stats
+                url: http://speedtest-tracker/api/v1/stats
                 headers:
                   Authorization: Bearer ${SPEEDTEST_TRACKER_API_TOKEN}
                   Accept: application/json
