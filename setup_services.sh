@@ -20,6 +20,8 @@
 #   AdGuard      — upstream DNS, rate limit, DNS blocklists (sudo yaml reconcile)
 #   NginxProxyMgr— proxy hosts + Let's Encrypt certs (DNS-01 via DuckDNS) from
 #                  the declarative HOSTS list below
+#   Pterodactyl  — location + node, then generates Wings' config.yml and patches
+#                  in the paths/subnet the panel doesn't emit (see Part 24)
 #
 # Requires: curl, jq, python3. Reads .env (written by setup_script.sh).
 
@@ -493,6 +495,156 @@ PY
   fi
 }
 
+# ─── Pterodactyl: location, node, and Wings' config.yml ──────────────────────
+# Panel 1.x exposes artisan commands for everything up to the node, so all of it
+# is reproducible from here. What stays manual in README Part 24: the admin user
+# (needs 1Password, like Forgejo), egg import and server creation. `artisan list`
+# has no egg, nest or allocation commands at all — egg import has no CLI and no
+# API endpoint in 1.x, so it is genuinely UI-only. Allocations have no command
+# either but are a flat table, so they are seeded by SQL below.
+#
+# Every artisan option falls through to an interactive prompt when omitted and
+# there is no TTY here, so each command passes every flag explicitly.
+
+PTERO_NODE_NAME=marlboro
+PTERO_NODE_FQDN=marlboro.tail314238.ts.net
+PTERO_ROOT=/mnt/tank/pterodactyl
+# Wings' default game-server network is 172.18.0.0/16 — which marlboro_homelab
+# already occupies. Overridden to a free range; 172.17 is docker0, 172.18 is
+# homelab, 172.19 is coolify.
+PTERO_SUBNET=172.22.0.0/16
+PTERO_GATEWAY=172.22.0.1
+# Valheim: game port + query port (always game+1). 0.0.0.0 so the server answers
+# on LAN, tailnet and the public router forward alike. Wings registers BOTH tcp and
+# udp for every allocated port, so Valheim's UDP needs nothing special here.
+PTERO_ALLOC_IP=0.0.0.0
+PTERO_ALLOC_PORTS=(2456 2457)
+
+# Run a query against the panel DB. Used for existence checks only.
+ptero_sql() {
+  docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T pterodactyl-db \
+    mariadb -N -B -u root -p"$(getenv PTERO_DB_ROOT_PASSWORD)" panel -e "$1" 2>/dev/null || true
+}
+
+ptero_artisan() {
+  docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T pterodactyl-panel php artisan "$@"
+}
+
+configure_pterodactyl() {
+  log "Pterodactyl: location + node + wings config"
+  local cfg="$SCRIPT_DIR/services/pterodactyl/wings-etc/config.yml"
+
+  if ! docker compose -f "$SCRIPT_DIR/docker-compose.yml" ps --status running --services 2>/dev/null | grep -qx pterodactyl-panel; then
+    warn "  pterodactyl-panel not running — skipping"; return
+  fi
+  # The entrypoint runs `migrate --seed --force` on boot; until it finishes the
+  # tables we check don't exist yet.
+  if [ -z "$(ptero_sql 'SHOW TABLES LIKE "nodes";')" ]; then
+    warn "  panel migrations haven't finished yet — re-run once it's up"; return
+  fi
+
+  local loc_id
+  loc_id=$(ptero_sql "SELECT id FROM locations WHERE short='home' LIMIT 1;")
+  if [ -n "$loc_id" ]; then
+    log "  location home exists (id $loc_id)"
+  else
+    ptero_artisan p:location:make --short=home --long="Marlboro" >/dev/null \
+      && loc_id=$(ptero_sql "SELECT id FROM locations WHERE short='home' LIMIT 1;") \
+      && log "  location home created (id $loc_id)" \
+      || { warn "  failed to create location"; return; }
+  fi
+
+  local node_id
+  node_id=$(ptero_sql "SELECT id FROM nodes WHERE name='$PTERO_NODE_NAME' LIMIT 1;")
+  if [ -n "$node_id" ]; then
+    log "  node $PTERO_NODE_NAME exists (id $node_id)"
+  else
+    # scheme=http + proxy=0 => wings serves plain HTTP and the browser console
+    # uses ws:// . daemonListeningPort is BOTH what wings binds internally and
+    # what the panel puts in the console websocket URL, so it must match the
+    # identity port mapping in docker-compose.yml (8092:8092).
+    ptero_artisan p:node:make \
+      --name="$PTERO_NODE_NAME" --description="Marlboro NAS" --locationId="$loc_id" \
+      --fqdn="$PTERO_NODE_FQDN" --public=1 --scheme=http --proxy=0 --maintenance=0 \
+      --maxMemory=3072 --overallocateMemory=0 --maxDisk=51200 --overallocateDisk=0 \
+      --uploadSize=100 --daemonListeningPort=8092 --daemonSFTPPort=2022 \
+      --daemonBase="$PTERO_ROOT/volumes" >/dev/null \
+      && node_id=$(ptero_sql "SELECT id FROM nodes WHERE name='$PTERO_NODE_NAME' LIMIT 1;") \
+      && log "  node $PTERO_NODE_NAME created (id $node_id)" \
+      || { warn "  failed to create node"; return; }
+  fi
+  [ -n "$node_id" ] || { warn "  no node id — skipping wings config"; return; }
+
+  # config.yml carries the node's daemon token, which the panel encrypts with its
+  # APP_KEY. Regenerate only when missing or when the token no longer matches the
+  # panel, so a wings restart doesn't churn the file on every run.
+  local want_token have_token
+  want_token=$(ptero_sql "SELECT daemon_token_id FROM nodes WHERE id=$node_id;")
+  have_token=$(python3 -c "
+import sys,yaml
+try:
+    print(yaml.safe_load(open('$cfg')).get('token_id') or '')
+except Exception:
+    print('')
+" 2>/dev/null)
+
+  if [ -f "$cfg" ] && [ -n "$want_token" ] && [ "$want_token" = "$have_token" ]; then
+    log "  wings config.yml already matches node $node_id"
+  else
+    ptero_artisan p:node:configuration "$node_id" --format=yaml > "$cfg.raw" 2>/dev/null \
+      || { warn "  p:node:configuration failed"; rm -f "$cfg.raw"; return; }
+    [ -s "$cfg.raw" ] || { warn "  p:node:configuration produced nothing"; rm -f "$cfg.raw"; return; }
+    mv "$cfg.raw" "$cfg"
+    log "  wings config.yml generated for node $node_id"
+  fi
+
+  # Patch the keys the panel never emits. Wings' path defaults are literal
+  # strings (/var/lib/pterodactyl/...), NOT derived from root_directory, so each
+  # one is set explicitly — otherwise archives and world backups land on the
+  # 30 GB root disk. Idempotent: re-running rewrites the same values.
+  python3 - "$cfg" "$PTERO_ROOT" "$PTERO_SUBNET" "$PTERO_GATEWAY" <<'PY'
+import sys, yaml
+cfg, root, subnet, gw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+d = yaml.safe_load(open(cfg)) or {}
+sysd = d.setdefault('system', {})
+sysd['root_directory']    = root
+sysd['log_directory']     = f'{root}/logs'
+sysd['data']              = f'{root}/volumes'
+sysd['archive_directory'] = f'{root}/archives'
+sysd['backup_directory']  = f'{root}/backups'
+sysd['tmp_directory']     = '/tmp/pterodactyl'
+net = d.setdefault('docker', {}).setdefault('network', {})
+net['interface'] = gw
+v4 = net.setdefault('interfaces', {}).setdefault('v4', {})
+v4['subnet'], v4['gateway'] = subnet, gw
+yaml.safe_dump(d, open(cfg, 'w'), default_flow_style=False, sort_keys=False)
+PY
+  log "  wings config.yml patched (root=$PTERO_ROOT, subnet=$PTERO_SUBNET)"
+
+  # Allocations. Panel 1.x has no artisan command for these, and the Application
+  # API needs a key that doesn't exist yet on a fresh install — so they go in by
+  # SQL. The table is a flat (node_id, ip, port) list; INSERT..WHERE NOT EXISTS
+  # keeps it idempotent without relying on a unique constraint.
+  local port
+  for port in "${PTERO_ALLOC_PORTS[@]}"; do
+    if [ -n "$(ptero_sql "SELECT id FROM allocations WHERE node_id=$node_id AND ip='$PTERO_ALLOC_IP' AND port=$port LIMIT 1;")" ]; then
+      log "  allocation $PTERO_ALLOC_IP:$port exists"
+    else
+      ptero_sql "INSERT INTO allocations (node_id, ip, port, created_at, updated_at)
+                 SELECT $node_id, '$PTERO_ALLOC_IP', $port, NOW(), NOW()
+                 FROM DUAL WHERE NOT EXISTS (
+                   SELECT 1 FROM allocations WHERE node_id=$node_id AND ip='$PTERO_ALLOC_IP' AND port=$port);" >/dev/null
+      if [ -n "$(ptero_sql "SELECT id FROM allocations WHERE node_id=$node_id AND ip='$PTERO_ALLOC_IP' AND port=$port LIMIT 1;")" ]; then
+        log "  allocation $PTERO_ALLOC_IP:$port created"
+      else
+        warn "  failed to create allocation $PTERO_ALLOC_IP:$port"
+      fi
+    fi
+  done
+
+  log "  restart wings to pick up config changes: docker compose restart wings"
+}
+
 # ─── Nginx Proxy Manager: proxy hosts + Let's Encrypt certs ──────────────────
 # Reconcile proxy hosts + their DNS-01 (DuckDNS) certs from the declarative list.
 # Creates missing cert + host, skips existing (manual tweaks survive). NPM must
@@ -615,6 +767,7 @@ configure_seerr
 configure_sms_bridge
 configure_prowlarr
 configure_adguard
+configure_pterodactyl
 configure_proxy_hosts
 
 echo ""

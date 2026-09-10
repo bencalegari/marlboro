@@ -108,6 +108,21 @@ ensure_password "Marlboro NAS - Samba"                    "bcalegari"
 # here; setup_services.sh writes the matching Authorization header into Seerr.
 ensure_secret   "Marlboro NAS - SMS Bridge"               "sms-bridge" "$(openssl rand -hex 32)"
 
+# Pterodactyl — game server panel (see README Part 24).
+# APP_KEY must be "base64:" + base64(32 bytes) (Laravel format). CRITICAL: this key
+# decrypts every Wings node's daemon token, so rotating it silently breaks every node
+# until its config.yml is regenerated. Treat it as permanent, not rotatable.
+ensure_secret   "Marlboro NAS - Pterodactyl App Key"      "pterodactyl" "base64:$(openssl rand -base64 32)"
+# Hashids salt obfuscates the short server IDs in panel URLs. The image self-generates
+# one if unset, but then it lives only in the container — pin it here.
+ensure_secret   "Marlboro NAS - Pterodactyl Hashids"      "pterodactyl" "$(openssl rand -hex 10)"
+ensure_password "Marlboro NAS - Pterodactyl DB"           "pterodactyl"
+ensure_password "Marlboro NAS - Pterodactyl DB Root"      "root"
+# Panel admin — created by artisan p:user:make in setup_services.sh, NOT consumed by
+# the container, so it stays out of .env. p:user:make requires 8+ chars, mixed case
+# and at least one digit; the generator's "letters,digits,32" satisfies that.
+ensure_password "Marlboro NAS - Pterodactyl Admin"        "ben"
+
 # DuckDNS token must be created manually — just warn if missing
 if ! op item get "Marlboro NAS - DuckDNS" --vault "$VAULT" &>/dev/null; then
   log "WARNING: 'Marlboro NAS - DuckDNS' not found in 1Password — DUCKDNS_TOKEN will be blank"
@@ -212,6 +227,13 @@ SMS_BRIDGE_HOOK_SECRET=$(pull_field "Marlboro NAS - SMS Bridge" password)
 SMS_BRIDGE_PUBLIC_URL=https://sms.marlboro-bc.duckdns.org/twilio/inbound
 # Hard ceiling on outbound texts per rolling 24h. Bounds worst-case Twilio spend.
 SMS_DAILY_CAP=100
+# ── Pterodactyl (see README Part 24) ──
+# PTERO_APP_KEY is load-bearing beyond the panel itself: it decrypts each Wings
+# node's daemon token. If it changes, every node goes offline until reconfigured.
+PTERO_APP_KEY=$(pull_field "Marlboro NAS - Pterodactyl App Key" password)
+PTERO_HASHIDS_SALT=$(pull_field "Marlboro NAS - Pterodactyl Hashids" password)
+PTERO_DB_PASSWORD=$(pull_field "Marlboro NAS - Pterodactyl DB" password)
+PTERO_DB_ROOT_PASSWORD=$(pull_field "Marlboro NAS - Pterodactyl DB Root" password)
 EOF
 
 chmod 600 "$ENV_FILE"
@@ -407,6 +429,28 @@ if [ -d /mnt/tank ]; then
 else
   log "WARNING: /mnt/tank not mounted — skipping media directory setup"
 fi
+
+# ─── Ensure Pterodactyl Directories ──────────────────────────────────────────
+# Wings hands bind-mount SOURCE paths to the host Docker daemon when it creates a
+# game container, while also reading those same files through its own filesystem.
+# Both views must agree, so every data path is mounted host==container (identity
+# mapped) in docker-compose.yml. Wings' own defaults (/var/lib/pterodactyl,
+# /var/log/pterodactyl) would need root to create and would sit on the 30 GB root
+# disk, so config.yml relocates root_directory + log_directory under /mnt/tank
+# (patched in by setup_services.sh) and these are the matching dirs.
+# /tmp/pterodactyl is Wings' tmp_directory — also identity mapped, since install
+# containers bind-mount it, but it stays on /tmp by design (short-lived).
+
+PTERO_DIRS=(/mnt/tank/pterodactyl/volumes /mnt/tank/pterodactyl/archives
+            /mnt/tank/pterodactyl/backups /mnt/tank/pterodactyl/logs /tmp/pterodactyl)
+
+for dir in "${PTERO_DIRS[@]}"; do
+  [ -d "$dir" ] || { mkdir -p "$dir" && log "Created $dir"; }
+done
+
+for dir in db panel-var panel-logs wings-etc run; do
+  [ -d "$SCRIPT_DIR/services/pterodactyl/$dir" ] || mkdir -p "$SCRIPT_DIR/services/pterodactyl/$dir"
+done
 
 # ─── Ensure Docker Waits for /mnt/tank ───────────────────────────────────────
 # Docker's data-root is /mnt/tank/docker and every service bind-mounts paths

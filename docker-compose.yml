@@ -7,6 +7,8 @@ services:
     # Minor-pinned so Watchtower patches 10.11.x but won't jump to 10.12/next major.
     image: jellyfin/jellyfin:10.11
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     network_mode: host  # required for DLNA auto-discovery
     environment:
       - TZ=America/Los_Angeles
@@ -31,6 +33,8 @@ services:
     container_name: plex
     image: lscr.io/linuxserver/plex
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     network_mode: host
     environment:
       - PUID=1000
@@ -50,6 +54,8 @@ services:
     container_name: adguard
     image: adguard/adguardhome
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     ports:
@@ -67,6 +73,8 @@ services:
     container_name: flaresolverr
     image: ghcr.io/flaresolverr/flaresolverr:latest
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     environment:
@@ -81,6 +89,8 @@ services:
     container_name: prowlarr
     image: lscr.io/linuxserver/prowlarr
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     environment:
@@ -98,6 +108,8 @@ services:
     container_name: radarr
     image: lscr.io/linuxserver/radarr
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     extra_hosts:
@@ -118,6 +130,8 @@ services:
     container_name: sonarr
     image: lscr.io/linuxserver/sonarr
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     extra_hosts:
@@ -138,6 +152,8 @@ services:
     container_name: bazarr
     image: lscr.io/linuxserver/bazarr
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     extra_hosts:
@@ -164,6 +180,8 @@ services:
     # re-resolve its digest (docker pulls by digest, tag is informational).
     image: ghcr.io/dictionarry-hub/profilarr:2.0.9@sha256:7a9b5112ff227320d17c65ab643a5d875713e6235991ef04a8e482ec51427902
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     extra_hosts:
@@ -182,6 +200,8 @@ services:
     image: ghcr.io/seerr-team/seerr:latest
     init: true
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     extra_hosts:
@@ -290,6 +310,8 @@ services:
     container_name: qbittorrent
     image: lscr.io/linuxserver/qbittorrent
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     environment:
@@ -320,6 +342,8 @@ services:
     container_name: flood
     image: jesec/flood:latest
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     user: "1000:1000"
     networks:
       - homelab
@@ -358,6 +382,8 @@ services:
     container_name: unpackerr
     image: golift/unpackerr
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     user: "1000:1000"
     networks:
       - homelab
@@ -423,6 +449,8 @@ services:
     container_name: immich-redis
     image: redis:6.2-alpine
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
 
@@ -453,6 +481,8 @@ services:
     # start on an old data dir. Stays in 12.x; bump deliberately + back up first.
     image: mariadb:12
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     environment:
@@ -474,6 +504,8 @@ services:
     # Major-pinned (next major 5.0 ships DB migrations). Bump with romm-db in mind.
     image: rommapp/romm:4
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     environment:
@@ -498,12 +530,206 @@ services:
       romm-db:
         condition: service_healthy
 
+  # ─── Game Server Panel ────────────────────────────────────────────────────
+  # Pterodactyl: a web panel (this stack) that drives a Wings node daemon, which
+  # in turn creates one Docker container per game server on the HOST daemon.
+  # Runs a Valheim server — see README Part 24.
+  #
+  # Tailnet-only by design, so there is deliberately no NPM proxy host and no
+  # cert anywhere in this stack. That is not just a scope choice: Pterodactyl's
+  # browser console opens a websocket DIRECTLY to Wings at
+  # ws(s)://<node fqdn>:<daemon port>/api/servers/<uuid>/ws, built from the node
+  # record — not proxied through the panel. An https panel would therefore force
+  # TLS on Wings too (mixed content), which is the usual source of pain here.
+  # Plain HTTP end-to-end keeps ws:// legal and needs no certificate.
+  #
+  # Pterodactyl publishes no official Docker install docs (only two
+  # docker-compose.example.yml files); three of their assumptions are wrong on
+  # this host and are corrected in the wings block below.
+
+  pterodactyl-db:
+    container_name: pterodactyl-db
+    # Major-pinned, same reasoning as romm-db: mariadb:latest floats across
+    # DB-engine majors and won't start on an old data dir. Panel needs >= 10.2.
+    # The upstream example's --default-authentication-plugin=mysql_native_password
+    # is a MySQL 8 caching_sha2 workaround and is not needed (or wanted) here.
+    image: mariadb:11
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - MARIADB_ROOT_PASSWORD=${PTERO_DB_ROOT_PASSWORD}
+      - MARIADB_DATABASE=panel
+      - MARIADB_USER=pterodactyl
+      - MARIADB_PASSWORD=${PTERO_DB_PASSWORD}
+    volumes:
+      - ./services/pterodactyl/db:/var/lib/mysql
+    labels:
+      - com.centurylinklabs.watchtower.enable=false   # panel DB — pin, don't auto-update
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pterodactyl-cache:
+    container_name: pterodactyl-cache
+    # Cache/session/queue backend. No password: bridge-only, never published,
+    # same posture as immich-redis. No volume — nothing here needs to survive a
+    # restart (sessions re-issue, queued jobs are re-dispatched).
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - homelab
+    labels:
+      - com.centurylinklabs.watchtower.enable=false   # pinned alongside the panel
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pterodactyl-panel:
+    container_name: pterodactyl-panel
+    # Pinned: the panel runs Laravel DB migrations on every boot, so a surprise
+    # major would migrate the DB out from under you. Bump deliberately, with a
+    # services/pterodactyl/db backup first.
+    #
+    # No separate queue-worker or cron container is needed: this image runs
+    # supervisord (php-fpm, nginx, queue:work --queue=high,standard,low) and
+    # bakes `artisan schedule:run` into root's crontab. The entrypoint also waits
+    # for the DB and runs `migrate --seed --force` itself.
+    image: ghcr.io/pterodactyl/panel:v1.15.1
+    restart: unless-stopped
+    networks:
+      - homelab
+    environment:
+      - TZ=America/Los_Angeles
+      # Must be the tailnet hostname, not an IP: the panel hands this to the
+      # browser and derives the Wings console websocket URL from the node record.
+      - APP_URL=http://marlboro.tail314238.ts.net:8091
+      - APP_ENV=production
+      - APP_ENVIRONMENT_ONLY=false
+      - APP_TIMEZONE=America/Los_Angeles
+      # Pinned in .env, NOT left to the image. The entrypoint self-generates a key
+      # when this is unset, and APP_KEY decrypts every Wings node's daemon token —
+      # a regenerated key takes all nodes offline. Same reason /app/var persists.
+      - APP_KEY=${PTERO_APP_KEY}
+      - APP_SERVICE_AUTHOR=bencalegari@navapbc.com
+      - HASHIDS_SALT=${PTERO_HASHIDS_SALT}
+      - DB_HOST=pterodactyl-db
+      - DB_PORT=3306
+      - DB_DATABASE=panel
+      - DB_USERNAME=pterodactyl
+      - DB_PASSWORD=${PTERO_DB_PASSWORD}
+      - CACHE_DRIVER=redis
+      - SESSION_DRIVER=redis
+      # QUEUE_CONNECTION, not the example's QUEUE_DRIVER — that name only still
+      # works as a legacy fallback in config/queue.php.
+      - QUEUE_CONNECTION=redis
+      - REDIS_HOST=pterodactyl-cache
+      - REDIS_PORT=6379
+      # No mail: log driver writes to storage/logs instead. (Do not copy the
+      # upstream example's MAIL_ENCRYPTION="true" — only tls/ssl/none are valid.)
+      - MAIL_MAILER=log
+      - MAIL_FROM_ADDRESS=noreply@marlboro-bc.duckdns.org
+      - RECAPTCHA_ENABLED=false
+      # LE_EMAIL intentionally unset: setting it makes the entrypoint swap in the
+      # SSL nginx config and run `certbot --standalone`, which would fail here and
+      # fight NPM for :80. Unset = plain-HTTP vhost, which is what we want.
+    volumes:
+      # /app/var holds the panel's own generated .env — must persist (see APP_KEY).
+      - ./services/pterodactyl/panel-var:/app/var
+      - ./services/pterodactyl/panel-logs:/app/storage/logs
+    ports:
+      - "8091:80"
+    depends_on:
+      pterodactyl-db:
+        condition: service_healthy
+      pterodactyl-cache:
+        condition: service_healthy
+    labels:
+      - com.centurylinklabs.watchtower.enable=false   # runs DB migrations on boot
+
+  wings:
+    container_name: wings
+    # Pinned: wings and the panel negotiate a versioned API; a floating wings can
+    # outrun the panel and drop the node offline. Bump the pair together.
+    #
+    # Wings is NOT docker-in-docker. It is a sibling orchestrator: it talks to the
+    # HOST daemon over docker.sock to create/start/stop each game container, pull
+    # egg images and run installers. It needs no --privileged.
+    #
+    # Distroless image: no shell, so `docker exec` debugging is impossible — use
+    # `docker run --rm --entrypoint /usr/bin/wings ...`. The upstream example's
+    # WINGS_UID/WINGS_GID/WINGS_USERNAME are stale leftovers from the old Alpine
+    # image and are inert here; omitted.
+    image: ghcr.io/pterodactyl/wings:v1.13.3
+    restart: unless-stopped
+    networks:
+      - homelab
+    # `remote` in config.yml is the panel's APP_URL — a MagicDNS name that
+    # container DNS (1.1.1.1/8.8.8.8 per daemon.json) cannot resolve. Same idiom
+    # the arr stack uses to reach host-networked services: point the name at the
+    # host gateway and hit the published 8091.
+    extra_hosts:
+      - "marlboro.tail314238.ts.net:host-gateway"
+    tty: true
+    environment:
+      - TZ=America/Los_Angeles
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # ── Identity mounts (host path == container path). NOT stylistic. ──
+      # Wings passes bind-mount SOURCE paths to the host daemon when creating a
+      # game container, while also reading those files through its own mount
+      # namespace. Both views must resolve to the same place, so these cannot be
+      # remapped. Getting it wrong yields servers that install into an empty
+      # directory, or "no such file or directory" on container create.
+      #
+      # config.yml sets root_directory here (volumes/ archives/ backups/ logs/),
+      # so this one mount covers all of them and keeps world backups off the
+      # 30 GB root disk.
+      - /mnt/tank/pterodactyl:/mnt/tank/pterodactyl
+      # tmp_directory: install containers bind-mount it, so it is identity mapped
+      # too. Stays on /tmp by design — short-lived scratch.
+      - /tmp/pterodactyl:/tmp/pterodactyl
+      # Log tailing for the web console. The upstream example says
+      # /var/lib/docker/containers, but /etc/docker/daemon.json relocates
+      # data-root to /mnt/tank/docker — copied verbatim that path is EMPTY here
+      # and the console shows nothing, with no error anywhere.
+      - /mnt/tank/docker/containers:/mnt/tank/docker/containers
+      # ── Internal-only paths: never handed to the host daemon, so these are
+      # free to live under services/ like every other service's state. ──
+      - ./services/pterodactyl/wings-etc:/etc/pterodactyl
+      - ./services/pterodactyl/run:/run/wings
+      # Lets wings validate the panel's cert. Harmless on plain HTTP; keep it so
+      # switching the panel to https later doesn't fail confusingly.
+      - /etc/ssl/certs:/etc/ssl/certs:ro
+    ports:
+      # Identity mapping is required, not cosmetic: the node's daemonListen is
+      # BOTH the port wings binds inside the container (api.port) AND the port the
+      # panel embeds in the console websocket URL the browser opens. Host 8080 is
+      # Glance, so the node is configured for 8092 and this maps straight through.
+      # "8092:8080" would leave the browser dialling a port nothing listens on.
+      - "8092:8092"
+      - "2022:2022"   # SFTP — wings implements it itself, no sshd involved
+    depends_on:
+      - pterodactyl-panel
+    labels:
+      # Unlabelled by scope on purpose (see WATCHTOWER_SCOPE on the watchtower
+      # service): wings-created game containers use floating egg images, and
+      # Watchtower must never recreate a running game server.
+      - com.centurylinklabs.watchtower.enable=false
+
   # ─── Docker Management ────────────────────────────────────────────────────
 
   portainer:
     container_name: portainer
     image: portainer/portainer-ce
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     volumes:
@@ -520,6 +746,8 @@ services:
     # a surprise major could break routing. Stays in 2.x.
     image: jc21/nginx-proxy-manager:2
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     extra_hosts:
@@ -538,6 +766,8 @@ services:
     container_name: scrutiny
     image: ghcr.io/analogj/scrutiny:master-omnibus
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     cap_add:
@@ -560,6 +790,8 @@ services:
     container_name: watchtower
     image: containrrr/watchtower:latest
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     volumes:
@@ -567,6 +799,14 @@ services:
     environment:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_SCHEDULE=0 0 4 * * *
+      # Opt-in updates. With a scope set, Watchtower touches ONLY containers
+      # carrying a matching com.centurylinklabs.watchtower.scope label — so the
+      # game-server containers Wings creates on the host socket (floating egg
+      # images, e.g. ghcr.io/parkervcp/games:valheim) are ignored by construction,
+      # now and for every server added later. Per-container enable=false labels
+      # could never cover containers that don't exist yet.
+      # A new service gets no auto-updates until it opts in with a scope label.
+      - WATCHTOWER_SCOPE=homelab
       - TZ=America/Los_Angeles
       - DOCKER_API_VERSION=1.55           # tracks host engine API (26.04 = 1.55); re-check after OS upgrade (see README → Upgrading the Ubuntu Release)
 
@@ -576,6 +816,8 @@ services:
     container_name: uptime-kuma
     image: louislam/uptime-kuma:latest
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     volumes:
@@ -589,6 +831,8 @@ services:
     container_name: speedtest-tracker
     image: lscr.io/linuxserver/speedtest-tracker:latest
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     environment:
@@ -609,6 +853,8 @@ services:
     container_name: glance
     image: glanceapp/glance
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     environment:
@@ -662,11 +908,21 @@ services:
       - speedtest-tracker
 
   # ─── Application Platform ─────────────────────────────────────────────────
+  # NOTE: this stack is intentionally STOPPED to free memory for the Pterodactyl
+  # game server (see README Part 20 + Part 24). The blocks and all data under
+  # services/coolify/ are kept so it can come back. `docker compose up -d` with
+  # no service name WILL restart these — bring the stack up by naming services,
+  # or `docker compose stop coolify coolify-realtime coolify-db coolify-redis`
+  # afterwards. coolify-sentinel is spawned by Coolify itself, not by compose,
+  # so it must be stopped with plain `docker stop coolify-sentinel`.
+
 
   coolify-db:
     container_name: coolify-db
     image: postgres:15-alpine
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     environment:
@@ -686,6 +942,8 @@ services:
     container_name: coolify-redis
     image: redis:7-alpine
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     command: redis-server --requirepass ${COOLIFY_REDIS_PASSWORD} --save 60 1 --loglevel warning
@@ -780,6 +1038,8 @@ services:
     container_name: forgejo
     image: codeberg.org/forgejo/forgejo:11
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     environment:
@@ -812,6 +1072,8 @@ services:
     container_name: duckdns
     image: lscr.io/linuxserver/duckdns
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.scope=homelab
     networks:
       - homelab
     environment:

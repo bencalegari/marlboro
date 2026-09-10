@@ -46,6 +46,16 @@ services/sms-bridge/*
 !services/sms-bridge/site/
 !services/sms-bridge/site/*
 
+# Exception: the Valheim egg JSON. Panel 1.x has no egg-import CLI and no API
+# endpoint for it, so importing is a manual UI step and this file is the only
+# record of what to re-import on a rebuild. Everything else under
+# services/pterodactyl/ is runtime state and stays ignored — the panel's
+# generated .env (holds APP_KEY), wings' config.yml (holds the node token) and
+# the panel DB.
+!services/pterodactyl/
+services/pterodactyl/*
+!services/pterodactyl/egg-valheim.json
+
 # Media & downloads
 media/
 downloads/

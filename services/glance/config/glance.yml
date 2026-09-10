@@ -398,6 +398,9 @@ pages:
               - title: Immich
                 url: http://immich-server:2283
                 same-tab: true
+              - title: Pterodactyl
+                url: http://pterodactyl-panel:80
+                same-tab: true
               - title: Portainer
                 url: http://portainer:9000
                 same-tab: true
@@ -541,6 +544,8 @@ pages:
                     url: http://192.168.0.10:2283
                   - title: RomM
                     url: http://192.168.0.10:7070
+                  - title: Pterodactyl
+                    url: http://192.168.0.10:8091
                   - title: Portainer
                     url: http://192.168.0.10:9000
                   - title: Nginx Proxy Manager
@@ -581,6 +586,8 @@ pages:
                     url: http://${TAILSCALE_HOSTNAME}:2283
                   - title: RomM
                     url: http://${TAILSCALE_HOSTNAME}:7070
+                  - title: Pterodactyl
+                    url: http://${TAILSCALE_HOSTNAME}:8091
                   - title: Portainer
                     url: http://${TAILSCALE_HOSTNAME}:9000
                   - title: Nginx Proxy Manager
@@ -787,6 +794,8 @@ pages:
               - jesec/flood
               - immich-app/immich
               - rommapp/romm
+              - pterodactyl/panel
+              - pterodactyl/wings
               - louislam/uptime-kuma
               - portainer/portainer
               - containrrr/watchtower

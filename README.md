@@ -22,6 +22,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 - **Unpackerr** — Auto-extracts `.rar`/`.zip` releases so Radarr/Sonarr can import them
 - **Immich** — Self-hosted photo/video library with mobile backup
 - **RomM** — ROM manager and in-browser emulator
+- **Pterodactyl** — Game server control panel (Panel + Wings node); runs a Valheim dedicated server
 - **Portainer** — Docker management UI
 - **Nginx Proxy Manager** — Reverse proxy with Let's Encrypt
 - **Scrutiny** — Drive S.M.A.R.T. monitoring
@@ -60,6 +61,10 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 | Unpackerr | — | Background archive extractor for the Arr stack; no web UI |
 | Immich | 2283 | |
 | RomM | 7070 | |
+| Pterodactyl (panel) | 8091 | Internal container port is 80. Tailnet/LAN only — not proxied |
+| Pterodactyl (wings API) | 8092 | Identity-mapped on purpose: the node's daemon port is also what the browser console dials |
+| Pterodactyl (SFTP) | 2022 | Wings implements SFTP itself; no sshd involved |
+| Valheim (game) | 2456–2457 UDP | Wings publishes these from the game container. **The only publicly forwarded ports besides 80/443** |
 | Portainer | 9000 | |
 | Nginx Proxy Manager (admin) | 81 | |
 | Nginx Proxy Manager (http) | 80 | |
@@ -124,9 +129,11 @@ op item get "Marlboro NAS - Network" --vault Private
 
 **Watchtower requires `DOCKER_API_VERSION=1.55`** to match the 26.04 host Docker engine. This pin tracks the host engine's API version, so revisit it after any OS/engine upgrade — match `docker version --format '{{.Server.APIVersion}}'`.
 
-**Watchtower watches every container (no `WATCHTOWER_LABEL_ENABLE`) and updates nightly at 4 AM.** That's fine for stateless services, but data-bearing apps that ship breaking DB migrations must not float — an unattended major bump can crash-loop or corrupt on-disk data (this bit Immich: a `:release` jump to v3 dropped pgvecto.rs while the DB image stayed put). Policy:
+**Watchtower updates nightly at 4 AM, and only containers that opt in.** `WATCHTOWER_SCOPE=homelab` means it considers *only* containers carrying a matching `com.centurylinklabs.watchtower.scope=homelab` label — **a new service gets no auto-updates until you add that label.** The scope exists because Pterodactyl's Wings creates game-server containers on the host Docker socket using floating egg images (`ghcr.io/parkervcp/games:valheim`); without it, Watchtower would recreate a *running game server* at 4 AM. Per-container `enable=false` labels can't solve that, since they only cover containers that already exist — every server added later would be exposed again. Opting in is fine for stateless services, but data-bearing apps that ship breaking DB migrations must not float — an unattended major bump can crash-loop or corrupt on-disk data (this bit Immich: a `:release` jump to v3 dropped pgvecto.rs while the DB image stayed put). Policy:
 - **Pin the tag** so Watchtower only patches within a safe line: `jellyfin:10.11`, `mariadb:12` (romm-db), `rommapp/romm:4`, `jc21/nginx-proxy-manager:2`, `codeberg.org/forgejo/forgejo:11`, `postgres:15-alpine`/`14-…` (coolify-db, immich-postgres), `binwiederhier/ntfy:2.26.0` (pinned by tag+digest). Bump these deliberately after reading release notes; **back up the DB first** for anything stateful.
 - **Fence with `com.centurylinklabs.watchtower.enable=false`** where there's no clean version tag or the app self-updates: Immich (`immich-server`/`immich-machine-learning`/`immich-postgres`, upgraded by hand in lockstep), Coolify (`coolify`/`coolify-realtime`, update via Coolify's own UI), and ntfy (holds a message cache DB — pinned, bump deliberately).
+- **Omit the scope label entirely** for anything that should never auto-update: the four Pterodactyl containers (`pterodactyl-db`, `pterodactyl-cache`, `pterodactyl-panel`, `wings`) are pinned and carry `enable=false` as well, belt-and-braces. `enable=false` and the scope are independent mechanisms; the fence still wins if both are present.
+- **Two DB containers auto-update within their pinned tag** (`romm-db` on `mariadb:12`, `coolify-db` on `postgres:15-alpine`, `immich-redis` on `redis:6.2-alpine`). That was the behaviour before the scope change and it was preserved deliberately, but consider fencing them too the next time you touch that area.
 
 **Sunshine runs as the native Ubuntu `.deb`** (not Docker), started by `systemctl --user` inside a **sway** (wlroots) session, capturing the connected display with `capture=kms`. Sway is required: GNOME/Mutter Wayland is uncapturable (empty KMS monitor list, no `wlr-screencopy`) and questing ships no GNOME-on-Xorg session, so `capture=x11` is a dead end. It streams **H.264 only** — this Mac Mini's Intel UHD 630 can decode HEVC but has no HEVC/AV1 *encode* entrypoint (same hardware limit as the Jellyfin note). The whole host is provisioned idempotently by `setup_script.sh` (its `configure_sunshine` step, Part 5/7) — including seeding the web-UI login from 1Password; only Moonlight pairing is manual (Part 7).
 
@@ -924,7 +931,7 @@ tailscale ssh <your-username>@<tailscale-hostname>
 
 After `docker compose up -d`, run **`./setup_services.sh`** — it does the wiring
 marked ⚙ below (qBittorrent, Prowlarr apps + FlareSolverr proxy, Radarr/Sonarr
-download client + root folders + settings, AdGuard).
+download client + root folders + settings, AdGuard, Pterodactyl location/node).
 The rest are first-run wizards / external accounts that stay manual.
 
 1. **AdGuard** — DNS first; ⚙ upstream/rate-limit/blocklists
@@ -942,8 +949,9 @@ The rest are first-run wizards / external accounts that stay manual.
 13. **Immich** — admin account, enable mobile backup
 14. **RomM** — admin account, add metadata API keys
 15. **Portainer** — set admin password
-16. **Sunshine** — pair first Moonlight client
-17. **Glance** — verify all services green
+16. **Pterodactyl** — ⚙ location + node + allocations + wings `config.yml`; then admin user, egg import and server creation (manual — see Part 24)
+17. **Sunshine** — pair first Moonlight client
+18. **Glance** — verify all services green
 
 ---
 
@@ -1397,6 +1405,24 @@ sudo ufw deny 32400
 ---
 
 ## Part 20: Coolify
+
+> **This stack is currently STOPPED.** It was stopped to free memory for the Pterodactyl
+> game server (Part 24) on a 7 GB box that was already swapping ~5.5 GB. The compose
+> blocks and everything under `services/coolify/` are kept, so it can come back at any
+> time. Two things to know:
+>
+> - **`docker compose up -d` with no service name will restart it.** Bring the rest of
+>   the stack up by naming services, or stop Coolify again afterwards.
+> - **`coolify-sentinel` is spawned by Coolify itself, not by compose**, so it needs a
+>   plain `docker stop coolify-sentinel`.
+>
+> ```bash
+> # bring it back
+> docker compose up -d coolify-db coolify-redis coolify coolify-realtime
+> # stop it again (note sentinel is not a compose service)
+> docker compose stop coolify coolify-realtime coolify-db coolify-redis
+> docker stop coolify-sentinel
+> ```
 
 Coolify is a self-hosted PaaS for deploying apps and managing servers via Docker. It runs alongside the existing stack with NPM as its reverse proxy. Coolify's built-in Traefik proxy is disabled so it doesn't conflict with NPM on ports 80/443.
 
@@ -1961,6 +1987,256 @@ Use the Forgejo already running at `git.marlboro-bc.duckdns.org` (public hostnam
 5. **Open both in a private window with no session.** If either asks for a login, the reviewer sees nothing and the submission is rejected. This is the most common failure.
 
 Keep that repo limited to the notice and the screenshot — no allowlist, no phone numbers other than the sending number itself.
+
+---
+
+## Part 24: Pterodactyl (Game Server Panel + Valheim)
+
+Pterodactyl is two pieces: a **Panel** (Laravel web app — this is the UI and API) and a
+**Wings** node daemon. Wings is *not* docker-in-docker; it talks to the **host** Docker
+socket and creates one sibling container per game server. Four containers make up the
+stack: `pterodactyl-db` (MariaDB), `pterodactyl-cache` (Redis), `pterodactyl-panel`, and
+`wings`.
+
+**Tailnet-only, and deliberately not behind NPM.** That isn't just a scope decision — it
+removes the single most awkward part of a Pterodactyl install. The browser console opens a
+websocket **directly to Wings** at `ws(s)://<node fqdn>:<daemon port>/api/servers/<uuid>/ws`,
+built from the node record rather than proxied through the panel. An HTTPS panel therefore
+forces TLS on Wings too (mixed content blocks `ws://` from an `https://` page), which means
+a second cert and a second proxy vhost. Plain HTTP end-to-end over the tailnet keeps
+`ws://` legal and needs no certificate at all. Valheim's game traffic is UDP and could
+never traverse NPM regardless, so it is forwarded straight from the router.
+
+Pterodactyl publishes **no official Docker install documentation** — only two
+`docker-compose.example.yml` files (see `pterodactyl/documentation#457`). Three of their
+assumptions are wrong on this host; all three are fixed in `docker-compose.yml` and
+explained in 24.10.
+
+Everything up to and including the node, its Wings config and its allocations is scripted
+(24.1, 24.4, 24.5). Three steps stay manual: the **admin user** (needs 1Password, like
+Forgejo), the **egg import** and **server creation** (both UI-only in panel 1.x), and the
+**router forward** (24.8).
+
+### 24.1 Run the Setup Script
+
+```bash
+./setup_script.sh
+```
+
+| 1Password Item | .env Variable | Used For |
+|---|---|---|
+| `Marlboro NAS - Pterodactyl App Key` | `PTERO_APP_KEY` | Laravel `APP_KEY`. **Also decrypts every Wings node's daemon token** |
+| `Marlboro NAS - Pterodactyl Hashids` | `PTERO_HASHIDS_SALT` | Obfuscates short server IDs in panel URLs |
+| `Marlboro NAS - Pterodactyl DB` | `PTERO_DB_PASSWORD` | Panel → MariaDB |
+| `Marlboro NAS - Pterodactyl DB Root` | `PTERO_DB_ROOT_PASSWORD` | MariaDB root (also used for the reconciler's existence checks) |
+| `Marlboro NAS - Pterodactyl Admin` | *(not in .env)* | Panel admin account, created by CLI in 24.3 |
+
+`APP_KEY` is **not rotatable.** The panel encrypts each node's daemon token with it, so
+changing it takes every node offline until its `config.yml` is regenerated. It is pinned in
+`.env` rather than left to the image (whose entrypoint would self-generate one), and
+`services/pterodactyl/panel-var` is a persistent mount because the panel's own generated
+`.env` lives there. Back both up alongside the DB.
+
+The script also creates the data directories, including the identity-mapped ones under
+`/mnt/tank/pterodactyl` (see 24.10).
+
+### 24.2 Start the Panel
+
+```bash
+docker compose up -d pterodactyl-db pterodactyl-cache
+docker compose up -d pterodactyl-panel
+docker compose logs -f pterodactyl-panel
+```
+
+The image's entrypoint waits for the DB and then runs `php artisan migrate --seed --force`
+itself, so there is no manual migration step — wait for the migrations to finish and nginx
+to come up. No separate queue-worker or cron container is needed either: the image runs
+supervisord (`php-fpm`, `nginx`, `queue:work --queue=high,standard,low`) and bakes
+`artisan schedule:run` into root's crontab.
+
+Confirm before going further:
+
+```bash
+curl -I http://192.168.0.10:8091     # expect 302 -> /auth/login
+```
+
+### 24.3 Create the Admin Account
+
+Same pattern as Forgejo (Part 22.3) — the password comes straight from 1Password and never
+lands in `.env`:
+
+```bash
+docker compose exec -T pterodactyl-panel php artisan p:user:make \
+  --email=bencalegari@navapbc.com \
+  --username="$(op item get 'Marlboro NAS - Pterodactyl Admin' --vault Private --fields username --reveal)" \
+  --name-first=Ben --name-last=Calegari \
+  --password="$(op item get 'Marlboro NAS - Pterodactyl Admin' --vault Private --fields password --reveal)" \
+  --admin=1
+```
+
+Every artisan option falls through to an **interactive prompt** when omitted, and
+`docker compose exec -T` has no TTY — so pass every flag explicitly or the command hangs.
+`p:user:make` requires 8+ characters, mixed case and at least one digit; the generator's
+`letters,digits,32` satisfies that.
+
+Log in at `http://marlboro.tail314238.ts.net:8091` to confirm.
+
+### 24.4 Create the Node and Generate Wings' Config (scripted)
+
+```bash
+./setup_services.sh          # configure_pterodactyl step
+```
+
+`configure_pterodactyl()` creates the `home` location and the `marlboro` node
+(`p:location:make` / `p:node:make`), generates Wings' `config.yml` with
+`p:node:configuration` into `services/pterodactyl/wings-etc/`, and seeds the allocations
+(24.5). It is idempotent: it skips the location, node and allocations if they exist, and
+only regenerates `config.yml` when the node's daemon token no longer matches the panel.
+
+It then **patches two things the panel never emits**, which is the part that makes this
+work on this host:
+
+- **Paths.** Wings' directory defaults are literal strings (`/var/lib/pterodactyl/...`),
+  *not* derived from `root_directory`. Each one is set explicitly to
+  `/mnt/tank/pterodactyl/{volumes,archives,backups,logs}` — otherwise world backups land
+  on the 30 GB root disk.
+- **Network.** Wings' default game-server network is `172.18.0.0/16`, which
+  `marlboro_homelab` **already occupies** (172.17 is docker0, 172.19 is coolify). It is
+  overridden to `172.22.0.0/16`.
+
+Then start Wings and confirm the node badge goes green in the panel:
+
+```bash
+docker compose up -d wings
+docker compose logs -f wings
+```
+
+Wings is a **distroless** image — no shell, so `docker exec` debugging is impossible. Use
+`docker run --rm --entrypoint /usr/bin/wings ghcr.io/pterodactyl/wings:v1.13.3 --help`.
+
+### 24.5 Allocations (scripted)
+
+`configure_pterodactyl()` also seeds the allocations: IP `0.0.0.0`, ports `2456` and
+`2457`. Verify at Panel → **Admin → Nodes → marlboro → Allocations**.
+
+`0.0.0.0` rather than `192.168.0.10` so the server answers on LAN, tailnet and the public
+forward alike. Wings registers **both TCP and UDP** for every allocated port
+automatically, so Valheim's UDP needs nothing special. Note these ports are published by
+the *game* container, not by the `wings` service — which is why they are absent from the
+`wings` block's `ports:` list.
+
+These go in by **direct SQL**, unlike everything else in that function: panel 1.x has no
+`p:allocation:*` artisan command (confirmed against `artisan list` — there are no egg,
+nest or allocation commands at all), and the Application API needs an API key that doesn't
+exist yet on a fresh install. `allocations` is a flat `(node_id, ip, port)` table and the
+insert is guarded by `WHERE NOT EXISTS`, so it stays idempotent. To add ports for a second
+game server later, extend `PTERO_ALLOC_PORTS` and re-run.
+
+### 24.6 Import the Valheim Egg (manual, UI-only)
+
+Panel → **Admin → Nests** → create a nest (e.g. `Games`) → **Import Egg** → upload
+`services/pterodactyl/egg-valheim.json`.
+
+This is the one step with no automation path: panel 1.x has no egg-import artisan command
+and no Application API endpoint for it. That is exactly why the egg JSON is **committed**
+to the repo (with a `.gitignore` exception) — it is the only record of what to re-import
+on a rebuild, rather than depending on the upstream repo still existing. It came from
+`pelican-eggs/eggs` (formerly `parkervcp/eggs`),
+`game_eggs/steamcmd_servers/valheim/valheim_vanilla/egg-valheim.json`, `meta.version`
+`PTDL_v2`, docker image `ghcr.io/parkervcp/games:valheim`.
+
+### 24.7 Create the Valheim Server (manual)
+
+Panel → **Servers → Create New**. Owner = the admin from 24.3, nest/egg = the imported
+Valheim egg.
+
+| Setting | Value | Why |
+|---|---|---|
+| Primary allocation | `0.0.0.0:2456` | `{{SERVER_PORT}}` in the startup command |
+| Additional allocation | `0.0.0.0:2457` | Valheim's query port is always game port + 1 |
+| Memory | `2560` MB | Hard cap — this box has ~4 GB spare (see 24.10) |
+| Swap | `0` | A game server must never swap |
+| Disk | `8192` MB | Valheim + SteamCMD is ~2–3 GB; leaves room for backups |
+
+Egg variables worth setting: `SERVER_NAME`, `WORLD` (default `Dedicated`), `PASSWORD`
+(**5–20 chars, and it must not contain the world name** or Valheim refuses to start),
+`PUBLIC_SERVER=1`, `ENABLE_CROSSPLAY=1`, `AUTO_UPDATE=1`.
+
+Start it and watch the console. First boot pulls several GB via SteamCMD. It is ready when
+the console prints **`DungeonDB Start`** (the egg's configured done-string).
+
+### 24.8 Forward the Game Ports on the Router
+
+Valheim is the only thing here that goes public. On the router, forward **2456–2457/UDP →
+192.168.0.10**. Same manual step as the 80/443 forwards in 19.1; NPM is not involved
+because it cannot proxy UDP.
+
+Friends connect to `marlboro-bc.duckdns.org:2456` — DuckDNS already keeps that record
+current.
+
+Test from the LAN **before** touching the router, so a failure is unambiguously the game
+and not the forward. Note UDP will not show up in a TCP port checker — verify with an
+actual game client.
+
+### 24.9 Ports Used
+
+| Port | Purpose |
+|---|---|
+| 8091 | Panel web UI (container port 80). Tailnet/LAN only |
+| 8092 | Wings API + console websocket. **Identity-mapped** (see 24.10) |
+| 2022 | Wings SFTP (implemented by Wings itself, no sshd) |
+| 2456–2457 UDP | Valheim game + query. Published by the game container. **Publicly forwarded** |
+
+### 24.10 Caveats
+
+- **Host path must equal container path.** Wings hands bind-mount *source* paths to the
+  host Docker daemon when creating a game container, while also reading those same files
+  through its own mount namespace — both views must resolve to the same place. So
+  `/mnt/tank/pterodactyl`, `/tmp/pterodactyl` and `/mnt/tank/docker/containers` are all
+  mounted **host:container identically** and cannot be remapped. Symptoms of getting this
+  wrong: servers install into an empty directory, `no such file or directory` on container
+  create, or files visible in the panel's file manager but missing inside the game
+  container. Internal-only paths (`/etc/pterodactyl`, `/run/wings`) are exempt and live
+  under `services/` like everything else.
+- **Docker's data-root is not `/var/lib/docker`.** `daemon.json` sets it to
+  `/mnt/tank/docker` (Part 17.6), so the upstream example's
+  `/var/lib/docker/containers` mount points at an **empty directory** here. The console
+  would show no output, with no error logged anywhere. Mounted as
+  `/mnt/tank/docker/containers` instead.
+- **The daemon port is load-bearing twice.** The node's `daemonListen` is both what Wings
+  binds *inside* the container and what the panel embeds in the console websocket URL the
+  browser opens. Host 8080 is Glance, so the node uses 8092 and compose maps `8092:8092`.
+  A conventional `8092:8080` would leave the browser dialling a port nothing listens on.
+- **Watchtower is now opt-in.** `WATCHTOWER_SCOPE=homelab` exists because of this service:
+  Wings creates game containers with floating egg images, and Watchtower would happily
+  recreate a running game server at 4 AM. See the Watchtower policy in Quick Reference —
+  **a new service gets no auto-updates until you add the scope label.**
+- **Memory is the real constraint.** This is a 7 GB box that was already swapping ~5.5 GB.
+  Coolify was stopped to make room (Part 20). Two things measured along the way that are
+  worth not re-litigating: qBittorrent's apparent 1.7 GB is libtorrent mmap page cache
+  that the kernel reclaims on demand (its actual cgroup working set is ~35 MB), and
+  FlareSolverr **cannot** be removed — IPTorrents and BlueRoms are both enabled and
+  routed through it via Prowlarr's `flaresolverr` tag. If the box thrashes, the honest
+  fix is dropping Coolify permanently or moving Valheim to another host, not more tuning.
+- **Optional: enable zswap.** With swap this active, compressing swapped pages in RAM is a
+  cheap win. `max_pool_percent` is already 20; only `enabled` and `compressor` need
+  changing. Runtime (takes effect immediately, resets on reboot):
+
+  ```bash
+  echo 1    | sudo tee /sys/module/zswap/parameters/enabled
+  echo zstd | sudo tee /sys/module/zswap/parameters/compressor
+  ```
+
+  To persist, add `zswap.enabled=1 zswap.compressor=zstd zswap.max_pool_percent=20` to
+  `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, then `sudo update-grub` and reboot.
+- **Pinned and fenced.** All four containers are pinned by tag and carry
+  `watchtower.enable=false`. The panel runs DB migrations on every boot, so bump
+  `pterodactyl-panel` and `wings` **together**, deliberately, after backing up
+  `services/pterodactyl/db`.
+- **No official Docker docs.** Only the two `docker-compose.example.yml` files upstream.
+  Two further bugs in the panel example, for the record: `MAIL_ENCRYPTION: "true"` is
+  invalid (only `tls`/`ssl`/`none`), and `QUEUE_DRIVER` works only as a legacy fallback —
+  the current name is `QUEUE_CONNECTION`.
 
 ---
 
