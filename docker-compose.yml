@@ -604,6 +604,12 @@ services:
     restart: unless-stopped
     networks:
       - homelab
+    # The panel reaches the node at its FQDN + daemonListen (it does NOT use the
+    # container name), so it needs the same MagicDNS shim as wings — otherwise
+    # every panel->wings call fails and creating a server 500s after the DB row is
+    # already committed. Both directions need this; fixing only one is a trap.
+    extra_hosts:
+      - "marlboro.tail314238.ts.net:host-gateway"
     environment:
       - TZ=America/Los_Angeles
       # Must be the tailnet hostname, not an IP: the panel hands this to the
@@ -651,6 +657,15 @@ services:
         condition: service_healthy
     labels:
       - com.centurylinklabs.watchtower.enable=false   # runs DB migrations on boot
+    # Gates wings' start (below). Wings EXITS FATALLY if it can't reach the panel
+    # on boot, so "panel container started" isn't a strong enough signal — it has
+    # to be serving. start_period covers the entrypoint's migrate --seed run.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost/auth/login || exit 1"]
+      start_period: 120s
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   wings:
     container_name: wings
@@ -699,10 +714,17 @@ services:
       # data-root to /mnt/tank/docker — copied verbatim that path is EMPTY here
       # and the console shows nothing, with no error anywhere.
       - /mnt/tank/docker/containers:/mnt/tank/docker/containers
-      # ── Internal-only paths: never handed to the host daemon, so these are
-      # free to live under services/ like every other service's state. ──
+      # Also an identity mount, and easy to get wrong: wings writes a per-server
+      # machine-id under /run/wings/machine-id/<uuid> and bind-mounts THAT into the
+      # game container, so the host daemon has to resolve it too. Mapping it under
+      # services/ instead fails at container create with
+      # "bind source path does not exist: /run/wings/machine-id/<uuid>".
+      # /run is tmpfs, so the dir is wiped each boot and re-created by dockerd on
+      # container start — that's fine, the contents are per-boot scratch.
+      - /run/wings:/run/wings
+      # ── Internal-only path: never handed to the host daemon, so it is free to
+      # live under services/ like every other service's state. ──
       - ./services/pterodactyl/wings-etc:/etc/pterodactyl
-      - ./services/pterodactyl/run:/run/wings
       # Lets wings validate the panel's cert. Harmless on plain HTTP; keep it so
       # switching the panel to https later doesn't fail confusingly.
       - /etc/ssl/certs:/etc/ssl/certs:ro
@@ -715,7 +737,16 @@ services:
       - "8092:8092"
       - "2022:2022"   # SFTP — wings implements it itself, no sshd involved
     depends_on:
-      - pterodactyl-panel
+      # Must be service_healthy, not just started: wings calls
+      # GET <remote>/api/remote/servers on boot and treats a connection refusal as
+      # FATAL, exiting immediately. It does recover (restart: unless-stopped, and it
+      # re-attaches to a still-running game container rather than restarting it), but
+      # it crash-loops in the meantime and the node shows offline in the panel.
+      # NOTE: docker restart policies do not honour depends_on, so after a HOST
+      # reboot wings can still lose the race and briefly crash-loop until the panel
+      # is serving. That is expected and self-healing.
+      pterodactyl-panel:
+        condition: service_healthy
     labels:
       # Unlabelled by scope on purpose (see WATCHTOWER_SCOPE on the watchtower
       # service): wings-created game containers use floating egg images, and

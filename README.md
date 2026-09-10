@@ -64,7 +64,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 | Pterodactyl (panel) | 8091 | Internal container port is 80. Tailnet/LAN only — not proxied |
 | Pterodactyl (wings API) | 8092 | Identity-mapped on purpose: the node's daemon port is also what the browser console dials |
 | Pterodactyl (SFTP) | 2022 | Wings implements SFTP itself; no sshd involved |
-| Valheim (game) | 2456–2457 UDP | Wings publishes these from the game container. **The only publicly forwarded ports besides 80/443** |
+| Valheim (game) | 2456–2457 UDP | Published on the host by the game container. **Forwarded on the router** — crossplay is off, so players direct-connect (see 24.8) |
 | Portainer | 9000 | |
 | Nginx Proxy Manager (admin) | 81 | |
 | Nginx Proxy Manager (http) | 80 | |
@@ -2005,16 +2005,16 @@ built from the node record rather than proxied through the panel. An HTTPS panel
 forces TLS on Wings too (mixed content blocks `ws://` from an `https://` page), which means
 a second cert and a second proxy vhost. Plain HTTP end-to-end over the tailnet keeps
 `ws://` legal and needs no certificate at all. Valheim's game traffic is UDP and could
-never traverse NPM regardless, so it is forwarded straight from the router.
+never traverse NPM regardless, so it is forwarded straight from the router (24.8).
 
 Pterodactyl publishes **no official Docker install documentation** — only two
 `docker-compose.example.yml` files (see `pterodactyl/documentation#457`). Three of their
 assumptions are wrong on this host; all three are fixed in `docker-compose.yml` and
-explained in 24.10.
+explained in 24.13.
 
 Everything up to and including the node, its Wings config and its allocations is scripted
 (24.1, 24.4, 24.5). Three steps stay manual: the **admin user** (needs 1Password, like
-Forgejo), the **egg import** and **server creation** (both UI-only in panel 1.x), and the
+Forgejo), the **egg import** plus **server creation** (both UI-only in panel 1.x), and the
 **router forward** (24.8).
 
 ### 24.1 Run the Setup Script
@@ -2160,34 +2160,192 @@ Valheim egg.
 
 Egg variables worth setting: `SERVER_NAME`, `WORLD` (default `Dedicated`), `PASSWORD`
 (**5–20 chars, and it must not contain the world name** or Valheim refuses to start),
-`PUBLIC_SERVER=1`, `ENABLE_CROSSPLAY=1`, `AUTO_UPDATE=1`.
+`PUBLIC_SERVER=1`, `AUTO_UPDATE=1`, and **`ENABLE_CROSSPLAY=0`** (PC/Steam-only group — see 24.8 for why, and what changes if you set it back to 1).
 
 Start it and watch the console. First boot pulls several GB via SteamCMD. It is ready when
 the console prints **`DungeonDB Start`** (the egg's configured done-string).
 
-### 24.8 Forward the Game Ports on the Router
+### 24.8 External Access — Direct Connect (crossplay off)
 
-Valheim is the only thing here that goes public. On the router, forward **2456–2457/UDP →
-192.168.0.10**. Same manual step as the 80/443 forwards in 19.1; NPM is not involved
-because it cannot proxy UDP.
+**Current config: `ENABLE_CROSSPLAY=0`.** The group is PC/Steam-only, so the server runs
+in Steam mode rather than over the PlayFab relay. Set on 2026-09-10, after a crossplay
+session showed relay-teardown noise (see the end of this section).
 
-Friends connect to `marlboro-bc.duckdns.org:2456` — DuckDNS already keeps that record
-current.
+In this mode the console logs `Registering lobby` → `Opened Steam server` →
+`Game server connected`, the server appears in the **Valheim community server browser**,
+and players join by direct connect on `marlboro-bc.duckdns.org:2456`. There is **no join
+code** — that is a crossplay/PlayFab feature.
 
-Test from the LAN **before** touching the router, so a failure is unambiguously the game
-and not the forward. Note UDP will not show up in a TCP port checker — verify with an
-actual game client.
+#### Verifying the game is actually listening
+
+**Check both address families.** Valheim binds the game port as an IPv6 wildcard socket
+(`[::]:2456`), which serves IPv4 too because `net.ipv6.bindv6only=0`. Reading only
+`/proc/<pid>/net/udp` gives a **false negative** — this cost real debugging time once:
+
+```bash
+PID=$(docker inspect <uuid> --format '{{.State.Pid}}')
+for f in udp udp6; do
+  echo "-- $f"; tail -n +2 /proc/$PID/net/$f | while read -r sl la rest; do echo $((16#${la#*:})); done | sort -n
+done
+# crossplay OFF -> udp: 2457 + ephemerals   udp6: 2456      <- game port here
+# crossplay ON  -> udp: 2457 + ephemerals   udp6: (no 2456) <- game port never bound
+```
+
+That difference is the whole reason the forward is pointless under crossplay and
+meaningful without it.
+
+#### Confirming packets actually reach the container
+
+Count arrivals inside the container's namespace with `Udp: InDatagrams`. Use a LAN control
+so you can tell a dead forward from a broken probe:
+
+```bash
+ind(){ grep -A1 '^Udp:' /proc/$PID/net/snmp | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="InDatagrams") c=i} NR==2{print $c}'; }
+burst(){ python3 -c "
+import socket,sys
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+for _ in range(200): s.sendto(b'x'*32,(sys.argv[1],2456))" "$1"; }
+a=$(ind); sleep 4; echo "drift: $(( $(ind) - a ))"                 # expect 0
+c=$(ind); burst 192.168.0.10; sleep 4; echo "LAN:  $(( $(ind) - c ))"   # expect 200
+e=$(ind); burst <public-ip>;   sleep 4; echo "WAN:  $(( $(ind) - e ))"
+```
+
+Measured 2026-09-10: drift 0, LAN **200**, WAN **3** (noise). Note `NoPorts` was the right
+counter *only* while 2456 was unbound; once it is bound, `InDatagrams` is the one to use.
+
+**A near-zero WAN result is NOT proof the forward is broken.** Testing an inbound UDP
+forward from inside the LAN depends on **UDP hairpin** (NAT loopback), which is frequently
+unsupported even where TCP hairpin works — and TCP hairpin *does* work on this router:
+
+```bash
+curl -k --resolve marlboro-bc.duckdns.org:443:<public-ip> https://marlboro-bc.duckdns.org/   # 302
+```
+
+The only honest test of inbound UDP is from **off-network** (a phone on cellular), or
+simply having someone connect.
+
+#### Router forward
+
+Required in this mode. TP-Link BE3600 → Advanced → NAT Forwarding → **Virtual Servers**:
+
+| External Port | Internal Port | Internal IP | Protocol |
+|---|---|---|---|
+| 2456 | 2456 | 192.168.0.10 | UDP |
+| 2457 | 2457 | 192.168.0.10 | UDP |
+
+NPM cannot help — it does not proxy UDP. Use `192.168.0.10`: it is the static address and
+what the host sources outbound traffic from. The NIC also carries a stray dynamic
+`192.168.0.37` lease which is **not** the right target.
+
+**UPnP is not an option here.** It looks healthy (`upnpc -l` finds the IGD and lists
+working Plex/qBittorrent mappings) but every `AddPortMapping` returns
+`501 (Action Failed)` for any port and protocol — the router's table is capped at **64 and
+permanently saturated**, 56 entries being transient `tailscale-portmap` churn:
+
+```bash
+upnpc -l | grep -cE '^ *[0-9]+ (TCP|UDP) '                     # 64 = full
+upnpc -l | awk -F"'" '{print $2}' | sort | uniq -c | sort -rn   # 56 are tailscale
+```
+
+Remember that when debugging *other* services: while the table is full, nothing on this
+LAN can add a UPnP mapping, so an evicted Plex or qBittorrent mapping will not return by
+itself.
+
+#### Why crossplay was turned off
+
+A 2.5-hour session with five players ran clean, then produced this for each player as they
+quit, within the final 13 minutes:
+
+```
+Keep socket for playfab/<id>, try to reconnect before timeout
+PlayFab network error ... code '4098': the operation was called with an invalid handle
+ZRpc timeout detected
+```
+
+Harmless as quit artifacts — zero network errors occurred in the preceding 2h34m — but it
+is relay dependency with no upside for a PC-only group. To go back (e.g. to admit an
+Xbox/Game Pass player), set `ENABLE_CROSSPLAY=1` and restart; the join code returns and the
+router rules become inert again. Saves are unaffected either way — the world reloaded with
+all 66,156 ZDOs and its player history intact across the switch.
 
 ### 24.9 Ports Used
 
 | Port | Purpose |
 |---|---|
 | 8091 | Panel web UI (container port 80). Tailnet/LAN only |
-| 8092 | Wings API + console websocket. **Identity-mapped** (see 24.10) |
+| 8092 | Wings API + console websocket. Port is **identity-mapped** on purpose (see 24.13) |
 | 2022 | Wings SFTP (implemented by Wings itself, no sshd) |
-| 2456–2457 UDP | Valheim game + query. Published by the game container. **Publicly forwarded** |
+| 2456–2457 UDP | Valheim game + query. 2456 binds as `[::]:2456` (dual-stack — check `udp6`, not just `udp`). **Forwarded on the router** (24.8) |
 
-### 24.10 Caveats
+### 24.10 Recovering a Server Stuck at `installing`
+
+If a server row exists but wings never built it (the panel 500'd on create, or wings was
+unreachable at that moment), the panel shows `installing` forever. Fix the underlying
+connectivity first, then re-dispatch the install rather than deleting and recreating.
+
+```bash
+# 1. Confirm both directions resolve. Both must print an address and reach the other.
+docker compose exec -T pterodactyl-panel sh -c \
+  'getent hosts marlboro.tail314238.ts.net && curl -s -o /dev/null -w "wings http=%{http_code}\n" http://marlboro.tail314238.ts.net:8092/api/system'
+# 401 from wings is CORRECT — it means HTTP works and auth is required.
+
+# 2. Make wings pick up any server rows it doesn't know about.
+docker compose restart wings
+docker compose logs --tail=20 wings      # expect: total_configs=1
+
+# 3. Re-dispatch the install (this is the same call the panel makes).
+UUID=$(docker compose exec -T pterodactyl-db mariadb -N -B -u root \
+  -p"$(grep -E '^PTERO_DB_ROOT_PASSWORD=' .env | cut -d= -f2-)" panel \
+  -e "SELECT uuid FROM servers WHERE status='installing' LIMIT 1;")
+TOK=$(python3 -c "import yaml;print(yaml.safe_load(open('services/pterodactyl/wings-etc/config.yml'))['token'])")
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  -H "Authorization: Bearer $TOK" "http://192.168.0.10:8092/api/servers/$UUID/install"
+# 202 = accepted. Watch: docker compose logs -f wings
+```
+
+**SteamCMD's first run can silently fail the download.** On a fresh volume, SteamCMD
+self-updates and *restarts mid-run*, which drops the queued `app_update`. The install log
+ends with `ERROR! Failed to install app '896660' (Missing configuration)` — but wings
+still marks `installed_at`, so the panel looks fine while the volume contains only
+`steamcmd/` and an empty `steamapps/` (~289 MB, no `valheim_server.x86_64`). Simply
+re-dispatch the install: the appinfo cache now persists in the volume, so the second run
+downloads all 2.3 GB and ends with `Success! App '896660' fully installed.` Check with:
+
+```bash
+ls -la /mnt/tank/pterodactyl/volumes/<uuid>/valheim_server.x86_64
+docker run --rm -v /mnt/tank/pterodactyl/logs/install:/l:ro alpine sh -c 'tail -20 /l/*.log'
+```
+
+(The install log directory is root-owned `0700`, hence reading it through a container.)
+
+A `could create base environment for server` error in the wings log **at boot** is benign
+— wings cannot pre-create a game container for a server that isn't installed yet. It is
+only a problem if it appears in response to an actual install or start request.
+
+Alternatively, Admin → Servers → *server* → Manage → **Reinstall Server** does the same
+thing from the UI once connectivity is fixed.
+
+### 24.11 Volume Ownership Looks Wrong But Isn't
+
+After a successful start, `/mnt/tank/pterodactyl/volumes/<uuid>` is owned by
+**`fwupd-refresh:fwupd-refresh`** on the host. That is not a bug — wings chowns server
+files to its configured `system.user` (uid/gid **988**), and 988 happens to map to
+`fwupd-refresh` in this host's `/etc/passwd`. The install script leaves everything
+root-owned; wings fixes it during the boot preflight. Don't "correct" it.
+
+### 24.12 Panel Log Permissions
+
+The panel's log directory is bind-mounted, and the entrypoint runs as **root** while
+php-fpm runs as **nginx** (uid 100). If a log file gets created during the root-run
+migration phase, the app cannot append to it afterwards — so **exceptions vanish silently
+and you get a bare 500 with no stack trace**, which makes any other problem far harder to
+diagnose. If `services/pterodactyl/panel-logs/laravel-*.log` is root-owned:
+
+```bash
+docker compose exec -T --user root pterodactyl-panel chown -R nginx:nginx /app/storage/logs
+```
+
+### 24.13 Caveats
 
 - **Host path must equal container path.** Wings hands bind-mount *source* paths to the
   host Docker daemon when creating a game container, while also reading those same files
@@ -2203,6 +2361,35 @@ actual game client.
   `/var/lib/docker/containers` mount points at an **empty directory** here. The console
   would show no output, with no error logged anywhere. Mounted as
   `/mnt/tank/docker/containers` instead.
+- **The MagicDNS shim is needed on BOTH containers.** `wings` needs it because
+  `remote` in its `config.yml` is the panel's `APP_URL`; the **panel** needs it because
+  it reaches the node at `<fqdn>:<daemonListen>` — it does *not* use the container name.
+  Container DNS (1.1.1.1/8.8.8.8 per `daemon.json`) cannot resolve a `.ts.net` name, so
+  both get `extra_hosts: marlboro.tail314238.ts.net:host-gateway`. Fixing only the wings
+  side is a trap with a nasty signature: the panel commits the server row to the DB, then
+  **500s** when it dispatches the build to wings. You are left with a server stuck at
+  `status=installing` that wings has never heard of. Recovery is in 24.10.
+- **`/run/wings` is an identity mount too, and it is the easy one to miss.** The obvious
+  identity mounts are the data paths, but wings also writes a per-server machine-id to
+  `/run/wings/machine-id/<uuid>` and bind-mounts *that* into the game container — so the
+  host daemon has to resolve it as well. Mapping it under `services/` instead looks
+  harmless and installs fine, then fails only at container **create** with
+  `bind source path does not exist: /run/wings/machine-id/<uuid>`, after a successful
+  2.3 GB install. `/run` is tmpfs, so the directory is wiped each boot and re-created by
+  dockerd on container start; the contents are per-boot scratch and that is fine. The
+  rule of thumb: if wings hands the path to the Docker daemon, it must be identity
+  mapped — only `/etc/pterodactyl` is genuinely wings-internal.
+- **Wings exits fatally if the panel isn't reachable when it starts.** It calls
+  `GET <remote>/api/remote/servers` on boot and treats a connection refusal as
+  `FATAL: failed to load server configurations`, then exits. So the panel carries a
+  healthcheck and wings uses `depends_on: condition: service_healthy` — "container
+  started" is not a strong enough signal, because the entrypoint's `migrate --seed` run
+  means the panel is up long before it is serving. Docker restart policies do **not**
+  honour `depends_on`, so after a *host* reboot wings can still lose the race and
+  crash-loop briefly; that is self-healing and harmless. Reassuringly, wings does not
+  kill a running game server when it comes back — it logs
+  `detected server is running, re-attaching to process...`, so a wings restart is safe
+  mid-session.
 - **The daemon port is load-bearing twice.** The node's `daemonListen` is both what Wings
   binds *inside* the container and what the panel embeds in the console websocket URL the
   browser opens. Host 8080 is Glance, so the node uses 8092 and compose maps `8092:8092`.

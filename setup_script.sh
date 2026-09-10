@@ -448,7 +448,7 @@ for dir in "${PTERO_DIRS[@]}"; do
   [ -d "$dir" ] || { mkdir -p "$dir" && log "Created $dir"; }
 done
 
-for dir in db panel-var panel-logs wings-etc run; do
+for dir in db panel-var panel-logs wings-etc; do
   [ -d "$SCRIPT_DIR/services/pterodactyl/$dir" ] || mkdir -p "$SCRIPT_DIR/services/pterodactyl/$dir"
 done
 
