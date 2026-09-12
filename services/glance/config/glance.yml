@@ -416,6 +416,14 @@ pages:
               # No bookmark for this one — it's an API bridge with no web UI.
               - title: SMS Bridge
                 url: http://sms-bridge:8080/healthz
+              # Likewise: one static JSON file, no UI. A 200 here means the join
+              # code the tile shows is being served (README 24.15).
+              - title: Valheim Join Code
+                url: http://valheim-joincode:8099/joincode.json
+              # Same shape again: a dead guard means the game silently stops
+              # updating and eventually locks players out (README 24.17).
+              - title: Valheim Auto-Update
+                url: http://valheim-autoupdate:8098/autoupdate.json
 
           # ── Nginx Proxy Manager — proxy hosts (glanceapp/community-widgets)
           - type: custom-api
@@ -546,6 +554,8 @@ pages:
                     url: http://192.168.0.10:7070
                   - title: Pterodactyl
                     url: http://192.168.0.10:8091
+                  - title: Valheim
+                    url: http://192.168.0.10:8091/server/0fe911ae
                   - title: Portainer
                     url: http://192.168.0.10:9000
                   - title: Nginx Proxy Manager
@@ -588,6 +598,8 @@ pages:
                     url: http://${TAILSCALE_HOSTNAME}:7070
                   - title: Pterodactyl
                     url: http://${TAILSCALE_HOSTNAME}:8091
+                  - title: Valheim
+                    url: http://${TAILSCALE_HOSTNAME}:8091/server/0fe911ae
                   - title: Portainer
                     url: http://${TAILSCALE_HOSTNAME}:9000
                   - title: Nginx Proxy Manager
@@ -772,6 +784,94 @@ pages:
                 </li>
                 {{ end }}
               </ul>
+
+          # ── Valheim (Pterodactyl client API). The game is UDP 2456/2457, so the
+          # monitor widget in column 2 cannot reach it — that widget is an HTTP
+          # prober. The panel's client API is the authoritative state source and
+          # needs a ptlc_ key, minted by hand in the panel UI (see README 24.14).
+          - type: custom-api
+            title: Valheim
+            title-url: http://192.168.0.10:8091/server/0fe911ae
+            cache: 1m
+            url: http://pterodactyl-panel:80/api/client/servers/0fe911ae/resources
+            headers:
+              Authorization: Bearer ${PTERO_CLIENT_API_KEY}
+              Accept: application/json
+            subrequests:
+              # Second call purely for the RAM cap, so the 2560 MB limit is read from
+              # the panel rather than duplicated here and left to drift.
+              limits:
+                url: http://pterodactyl-panel:80/api/client/servers/0fe911ae
+                headers:
+                  Authorization: Bearer ${PTERO_CLIENT_API_KEY}
+                  Accept: application/json
+              # Join code and password. The code appears only in the console at boot
+              # and no Pterodactyl API exposes it; the password is an egg variable
+              # the watcher reads from Wings, so it is never duplicated into .env
+              # or into this file (README 24.15).
+              joincode:
+                url: http://valheim-joincode:8099/joincode.json
+            template: |
+              {{/* 0fe911ae is servers.uuidShort — the panel identifier, stable for the
+                   life of the server. If the server is ever deleted and recreated,
+                   re-read it from the console URL or with
+                   SELECT uuidShort FROM servers (ptero_sql in setup_services.sh).
+
+                   Units are NOT uniform in this response: memory_bytes is bytes,
+                   limits.memory is MiB, uptime is milliseconds.
+
+                   Every resource field reads 0 while the server is stopped, so they
+                   are gated on current_state instead of rendering as zeros. States
+                   are running / starting / stopping / offline. */}}
+              {{/* Glance still runs this template on a non-2xx response, which would
+                   otherwise render a blank state line. 401 = key missing or wrong type
+                   (must be ptlc_, not ptla_); 403 = the key's allowed-IPs field is
+                   populated and omits the homelab subnet. Both are README 24.14. */}}
+              {{/* What players actually need — join code and password — comes from a
+                   different source than everything else on this tile, so it is
+                   resolved first and rendered in both branches: a dead panel API must
+                   not hide credentials that are still valid. An unreachable watcher
+                   (404, connection refused) leaves them blank. */}}
+              {{ $jc := .Subrequest "joincode" }}
+              {{ $code := "" }}
+              {{ $pw := "" }}
+              {{ if eq $jc.Response.StatusCode 200 }}
+                {{ $code = $jc.JSON.String "code" }}
+                {{ $pw = $jc.JSON.String "password" }}
+              {{ end }}
+              {{ if ne .Response.StatusCode 200 }}
+              <div class="flex items-center gap-10">
+                <div class="size-h3 color-negative">●</div>
+                <div class="grow min-width-0">
+                  <div class="size-h4 color-highlight">panel API {{ .Response.StatusCode }}</div>
+                  <div class="text-very-compact color-subdue text-truncate">{{ if $code }}join code {{ $code }}{{ else }}see README 24.14{{ end }}</div>
+                  {{ if $pw }}<div class="text-very-compact color-subdue text-truncate">password {{ $pw }}</div>{{ end }}
+                </div>
+              </div>
+              {{ else }}
+              {{ $state := .JSON.String "attributes.current_state" }}
+              {{ $up := eq $state "running" }}
+              <div class="flex items-center gap-10">
+                {{ if $up }}<div class="size-h3 color-positive">●</div>
+                {{ else if eq $state "offline" }}<div class="size-h3 color-negative">●</div>
+                {{ else }}<div class="size-h3" style="color:#e0a54f">●</div>{{ end }}
+                <div class="grow min-width-0">
+                  <div class="size-h4 color-highlight">{{ $state }}{{ if $up }} · {{ .JSON.Float "attributes.resources.uptime" | mul 0.000000277778 | printf "%.1f" }}h{{ end }}</div>
+                  {{/* Crossplay is on, so there is no address to show: players join
+                       with the code and the server password (README 24.8). A blank
+                       code means the watcher has not seen a boot yet — check
+                       `docker logs valheim-joincode`. */}}
+                  <div class="text-very-compact color-subdue text-truncate">{{ if $code }}join code {{ $code }}{{ else }}join code unknown{{ end }}</div>
+                  {{ if $pw }}<div class="text-very-compact color-subdue text-truncate">password {{ $pw }}</div>{{ end }}
+                </div>
+              </div>
+              {{ if $up }}
+              <ul class="list-horizontal-text">
+                <li>CPU {{ .JSON.Float "attributes.resources.cpu_absolute" | printf "%.1f" }}%</li>
+                <li>RAM {{ .JSON.Float "attributes.resources.memory_bytes" | mul 0.00000095367432 | printf "%.0f" }} / {{ (.Subrequest "limits").JSON.Float "attributes.limits.memory" | printf "%.0f" }} MiB</li>
+              </ul>
+              {{ end }}
+              {{ end }}
 
           - type: releases
             cache: 6h

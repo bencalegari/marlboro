@@ -56,6 +56,18 @@ services/sms-bridge/*
 services/pterodactyl/*
 !services/pterodactyl/egg-valheim.json
 
+# Exception: the join-code watcher script. The code it captures under
+# services/valheim-joincode/www/ is runtime state and stays ignored.
+!services/valheim-joincode/
+services/valheim-joincode/*
+!services/valheim-joincode/watch.py
+
+# Same shape: services/valheim-autoupdate/state/ is runtime state and stays
+# ignored; the script it runs is authored here.
+!services/valheim-autoupdate/
+services/valheim-autoupdate/*
+!services/valheim-autoupdate/guard.py
+
 # Media & downloads
 media/
 downloads/

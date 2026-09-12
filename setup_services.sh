@@ -21,7 +21,9 @@
 #   NginxProxyMgr— proxy hosts + Let's Encrypt certs (DNS-01 via DuckDNS) from
 #                  the declarative HOSTS list below
 #   Pterodactyl  — location + node, then generates Wings' config.yml and patches
-#                  in the paths/subnet the panel doesn't emit (see Part 24)
+#                  in the paths/subnet the panel doesn't emit (see Part 24);
+#                  plus the Valheim egg variables that let the game self-update
+#                  on restart (Part 24.16)
 #
 # Requires: curl, jq, python3. Reads .env (written by setup_script.sh).
 
@@ -513,12 +515,30 @@ PTERO_ROOT=/mnt/tank/pterodactyl
 # already occupies. Overridden to a free range; 172.17 is docker0, 172.18 is
 # homelab, 172.19 is coolify.
 PTERO_SUBNET=172.22.0.0/16
+PTERO_NETWORK=pterodactyl_nw
+PTERO_BRIDGE=pterodactyl0
 PTERO_GATEWAY=172.22.0.1
 # Valheim: game port + query port (always game+1). 0.0.0.0 so the server answers
 # on LAN, tailnet and the public router forward alike. Wings registers BOTH tcp and
 # udp for every allocated port, so Valheim's UDP needs nothing special here.
 PTERO_ALLOC_IP=0.0.0.0
 PTERO_ALLOC_PORTS=(2456 2457)
+PTERO_VALHEIM_SERVER=Valheim
+# Crossplay: 1 = PlayFab relay, which hands out a join code and needs no router
+# forward at all. 0 = Steam-only, where players direct-connect to
+# marlboro-bc.duckdns.org:2456 and 2456-2457/UDP must be forwarded on the
+# router. See README 24.8 before changing this.
+PTERO_VALHEIM_CROSSPLAY=1
+# SteamCMD update on boot. The game image's entrypoint runs
+# `steamcmd +app_update ${SRCDS_APPID}` on every container start unless this is
+# 0, so *restarting the server is the update mechanism* — there is no in-place
+# updater. Hence the nightly restart schedule below: without it the server drifts
+# behind the clients until someone restarts it by hand, and Valheim refuses
+# connections from a client newer than the server.
+PTERO_VALHEIM_AUTO_UPDATE=1
+# The nightly restart that applies that update is NOT a panel schedule — see
+# the removal below and README 24.17. This is only the name to remove.
+PTERO_VALHEIM_SCHEDULE="Nightly update restart"
 
 # Run a query against the panel DB. Used for existence checks only.
 ptero_sql() {
@@ -528,6 +548,74 @@ ptero_sql() {
 
 ptero_artisan() {
   docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T pterodactyl-panel php artisan "$@"
+}
+
+# Panel client (ptlc_) API key — the only Pterodactyl API that reports whether a
+# server is running, and so the Glance Valheim tile's data source (README 24.14).
+# Account keys are user-scoped, so it belongs to the admin who owns the server.
+#
+# Panel 1.x has no artisan command for keys, but nothing here needs the UI: the
+# secret is also recoverable, since api_keys holds the identifier in the clear and
+# the remainder encrypted with APP_KEY. So an existing key is re-printed rather
+# than a second one minted, and this stays idempotent.
+#
+# It deliberately does NOT write .env. setup_script.sh owns that file and rebuilds
+# it from 1Password on every run, so a key written here would vanish on the next
+# one; storing it in 1Password is the step that makes it stick.
+configure_ptero_client_key() {
+  log "Pterodactyl: client API key for the Glance tile"
+  if ! docker compose -f "$SCRIPT_DIR/docker-compose.yml" ps --status running --services 2>/dev/null | grep -qx pterodactyl-panel; then
+    warn "  pterodactyl-panel not running — skipping"; return
+  fi
+
+  local out state key envkey
+  out=$(ptero_artisan tinker --execute "$(cat <<'PHP'
+$user = \Pterodactyl\Models\User::where('root_admin', true)->orderBy('id')->first();
+if (!$user) {
+    echo "no-admin\n";
+} else {
+    $key = \Pterodactyl\Models\ApiKey::where('user_id', $user->id)
+        ->where('key_type', \Pterodactyl\Models\ApiKey::TYPE_ACCOUNT)
+        ->orderBy('id')->first();
+    if ($key) {
+        echo "existing " . $key->identifier . decrypt($key->token) . "\n";
+    } else {
+        $secret = \Illuminate\Support\Str::random(\Pterodactyl\Models\ApiKey::KEY_LENGTH);
+        $key = new \Pterodactyl\Models\ApiKey();
+        // forceFill, not create(): user_id and key_type are guarded against mass
+        // assignment, and the model still validates on save.
+        $key->forceFill([
+            'user_id'     => $user->id,
+            'key_type'    => \Pterodactyl\Models\ApiKey::TYPE_ACCOUNT,
+            'identifier'  => \Pterodactyl\Models\ApiKey::generateTokenIdentifier(\Pterodactyl\Models\ApiKey::TYPE_ACCOUNT),
+            'token'       => encrypt($secret),
+            'memo'        => 'Glance Valheim tile',
+            // Blank on purpose: Glance calls from the homelab Docker network, and
+            // an allowlist that omits that subnet 403s the widget silently.
+            'allowed_ips' => [],
+        ])->save();
+        echo "created " . $key->identifier . $secret . "\n";
+    }
+}
+PHP
+)" 2>/dev/null | tr -d '\r' | grep -E '^(no-admin|existing|created)' || true)
+
+  read -r state key <<<"${out:-}"
+  case "$state" in
+    "")         warn "  key check returned nothing — check the panel"; return ;;
+    no-admin)   warn "  no admin user yet — create one first (README 24.3)"; return ;;
+    created)    warn "  minted a client API key for the Glance tile" ;;
+  esac
+
+  envkey=$(getenv PTERO_CLIENT_API_KEY)
+  if [ "$envkey" = "$key" ]; then
+    log "  client API key matches .env"
+    return
+  fi
+  warn "  .env does not carry this key — the Valheim tile will show 'panel API 401'"
+  warn "  store it in 1Password as item 'Marlboro NAS - Pterodactyl Client API', field api_token:"
+  warn "    $key"
+  warn "  then: ./setup_script.sh && docker compose up -d glance"
 }
 
 configure_pterodactyl() {
@@ -641,6 +729,81 @@ PY
       fi
     fi
   done
+
+  # Panel egg variables. These live in the panel DB, not the container
+  # environment, so they are enforced here rather than in docker-compose.yml.
+  # Server creation is a manual UI step, so do nothing when the row does not
+  # exist yet.
+  local pair vname vwant vcur vrow
+  for pair in "ENABLE_CROSSPLAY=$PTERO_VALHEIM_CROSSPLAY" \
+              "AUTO_UPDATE=$PTERO_VALHEIM_AUTO_UPDATE"; do
+    vname=${pair%%=*}; vwant=${pair#*=}
+    vrow=$(ptero_sql "SELECT sv.id FROM server_variables sv
+                        JOIN egg_variables ev ON ev.id = sv.variable_id
+                        JOIN servers s        ON s.id  = sv.server_id
+                      WHERE ev.env_variable='$vname'
+                        AND s.name='$PTERO_VALHEIM_SERVER' LIMIT 1;")
+    if [ -z "$vrow" ]; then
+      log "  no $PTERO_VALHEIM_SERVER server yet - skipping $vname"
+      continue
+    fi
+    vcur=$(ptero_sql "SELECT variable_value FROM server_variables WHERE id=$vrow;")
+    if [ "$vcur" = "$vwant" ]; then
+      log "  $vname already $vwant"
+    else
+      ptero_sql "UPDATE server_variables SET variable_value='$vwant' WHERE id=$vrow;" >/dev/null
+      warn "  $vname $vcur -> $vwant; restart the Valheim server to apply it"
+    fi
+  done
+
+  # The nightly restart that keeps that update flowing is deliberately NOT a
+  # panel schedule. The panel scheduler can restart on a cron, but its only
+  # precondition is `only_when_online`, which just asks Wings whether the process
+  # is up — Pterodactyl has no game-query support and so exposes no player count
+  # anywhere. Restarting on top of a live session costs up to BACKUP_INTERVAL
+  # (1800s) of world state, so the trigger lives in the valheim-autoupdate
+  # container instead (README 24.17), which reads the count off the server's own
+  # console line. A leftover panel schedule would restart a second time, so it is
+  # removed here rather than merely left alone.
+  local sched_id
+  sched_id=$(ptero_sql "SELECT s.id FROM schedules s
+                          JOIN servers sv ON sv.id = s.server_id
+                        WHERE sv.name='$PTERO_VALHEIM_SERVER'
+                          AND s.name='$PTERO_VALHEIM_SCHEDULE' LIMIT 1;")
+  if [ -n "$sched_id" ]; then
+    ptero_sql "DELETE FROM tasks WHERE schedule_id=$sched_id;" >/dev/null
+    ptero_sql "DELETE FROM schedules WHERE id=$sched_id;" >/dev/null
+    warn "  removed panel schedule '$PTERO_VALHEIM_SCHEDULE' - valheim-autoupdate owns the restart"
+  else
+    log "  no panel restart schedule (valheim-autoupdate owns it)"
+  fi
+
+  # Game-container network. Wings creates this itself when it is missing, and it
+  # creates it with IPv6 enabled (ULA fdba:17c8:6c94::/64). This LAN has no IPv6
+  # egress, so a game container holding a v6 address sends Valheim's public-IP
+  # probe into a hot loop against ipv6.icanhazip.com / api6.ipify.org: ~90 log
+  # lines per second and half a core, with the PlayFab registration left without
+  # an IP (README 24.13). Pre-creating it v4-only avoids that, because wings
+  # uses an existing network as it finds it.
+  if ! docker network inspect "$PTERO_NETWORK" >/dev/null 2>&1; then
+    docker network create --driver bridge \
+      --subnet "$PTERO_SUBNET" --gateway "$PTERO_GATEWAY" \
+      --opt com.docker.network.bridge.name="$PTERO_BRIDGE" \
+      --opt com.docker.network.bridge.enable_icc=true \
+      --opt com.docker.network.bridge.enable_ip_masquerade=true \
+      --opt com.docker.network.bridge.host_binding_ipv4=0.0.0.0 \
+      --opt com.docker.network.driver.mtu=1500 \
+      "$PTERO_NETWORK" >/dev/null \
+      && log "  $PTERO_NETWORK created (IPv4-only, $PTERO_SUBNET)" \
+      || warn "  failed to create $PTERO_NETWORK"
+  elif [ "$(docker network inspect "$PTERO_NETWORK" --format '{{.EnableIPv6}}')" = "true" ]; then
+    # Recreating it means detaching every game container, so this is a warning
+    # rather than something the script does on its own.
+    warn "  $PTERO_NETWORK has IPv6 enabled; stop all game servers, then run"
+    warn "    docker network rm $PTERO_NETWORK && ./setup_services.sh && docker compose restart wings"
+  else
+    log "  $PTERO_NETWORK exists (IPv4-only)"
+  fi
 
   log "  restart wings to pick up config changes: docker compose restart wings"
 }
@@ -768,6 +931,7 @@ configure_sms_bridge
 configure_prowlarr
 configure_adguard
 configure_pterodactyl
+configure_ptero_client_key
 configure_proxy_hosts
 
 echo ""

@@ -142,7 +142,8 @@ fi
 # Note: the Sonarr/Radarr keys are also consumed by Unpackerr (archive
 # extraction), so a blank key here disables auto-extraction too, not just the
 # Glance widgets.
-for item in "Marlboro NAS - Sonarr" "Marlboro NAS - Radarr" "Marlboro NAS - Tailscale" "Marlboro NAS - Speedtest Tracker"; do
+for item in "Marlboro NAS - Sonarr" "Marlboro NAS - Radarr" "Marlboro NAS - Tailscale" \
+           "Marlboro NAS - Speedtest Tracker" "Marlboro NAS - Pterodactyl Client API"; do
   if ! op item get "$item" --vault "$VAULT" &>/dev/null; then
     log "WARNING: '$item' not found in 1Password — Glance widget will be blank until you add it"
   fi
@@ -234,6 +235,11 @@ PTERO_APP_KEY=$(pull_field "Marlboro NAS - Pterodactyl App Key" password)
 PTERO_HASHIDS_SALT=$(pull_field "Marlboro NAS - Pterodactyl Hashids" password)
 PTERO_DB_PASSWORD=$(pull_field "Marlboro NAS - Pterodactyl DB" password)
 PTERO_DB_ROOT_PASSWORD=$(pull_field "Marlboro NAS - Pterodactyl DB Root" password)
+# Client (ptlc_) key, minted in the panel UI — Account → API Credentials (README 24.14).
+# User-scoped: it only sees servers this user owns. Consumed solely by the Glance
+# Valheim tile. NOT the Application (ptla_) key — that API has no resources endpoint,
+# so it cannot report whether a server is running.
+PTERO_CLIENT_API_KEY=$(pull_field "Marlboro NAS - Pterodactyl Client API" api_token)
 EOF
 
 chmod 600 "$ENV_FILE"

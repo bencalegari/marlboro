@@ -753,6 +753,81 @@ services:
       # Watchtower must never recreate a running game server.
       - com.centurylinklabs.watchtower.enable=false
 
+  # Publishes the Valheim join code, which the game prints exactly once per boot
+  # and changes on every restart (README 24.15). Polls Wings' /logs route, whose
+  # window is only ~100 lines, writes the code to a JSON file for the Glance tile
+  # and pushes it to ntfy. Stock Python image running one authored script: the
+  # whole job is stdlib (urllib + http.server), so there is nothing to build and
+  # no packages to install at boot. Plain Alpine cannot do it - its BusyBox is
+  # built without the httpd applet, which lives in busybox-extras.
+  valheim-joincode:
+    container_name: valheim-joincode
+    image: python:3.13-alpine@sha256:7415fbc3c9e4979cc717d92377ab2bc7b2b4a2af1ac03cc52b5f3f88efedaf3a
+    restart: unless-stopped
+    networks:
+      - homelab
+    depends_on:
+      - wings
+      - ntfy
+    environment:
+      - TZ=America/Los_Angeles
+      # servers.uuid, not uuidShort - Wings' API is keyed by the full UUID.
+      - VALHEIM_UUID=0fe911ae-87fb-40ea-a1f9-eec00498c5b8
+      - NTFY_TOPIC=valheim
+      - POLL_SECONDS=60
+    volumes:
+      - ./services/valheim-joincode/watch.py:/watch.py:ro
+      # Wings' node token lives in its config; mounted read-only so the token is
+      # not copied into .env as a second source of truth.
+      - ./services/pterodactyl/wings-etc:/etc/pterodactyl:ro
+      # Captured code. A named path rather than a volume so the state survives a
+      # recreate and can be read from the host while debugging.
+      - ./services/valheim-joincode/www:/srv
+    command: ["python3", "-u", "/watch.py"]
+    labels:
+      # Pinned by digest and unlabelled by scope: this is a two-file service with
+      # no upstream to track, and a Python point bump would gain it nothing.
+      - com.centurylinklabs.watchtower.enable=false
+
+  # Keeps the Valheim build current (README 24.17). Restarting the server is what
+  # updates it - the egg image runs SteamCMD on every container start - and the
+  # game locks out any client newer than the server, so this restarts it nightly.
+  # It owns that trigger alone: the panel's own scheduler can restart on a cron
+  # but cannot see players, and Pterodactyl exposes no player count anywhere, so
+  # the count is read from the server's own console line via Wings' /logs route.
+  # Same image, token mount and stdlib-only shape as valheim-joincode; kept as a
+  # separate container so each script does one thing and can be restarted alone.
+  valheim-autoupdate:
+    container_name: valheim-autoupdate
+    image: python:3.13-alpine@sha256:7415fbc3c9e4979cc717d92377ab2bc7b2b4a2af1ac03cc52b5f3f88efedaf3a
+    restart: unless-stopped
+    networks:
+      - homelab
+    depends_on:
+      - wings
+    environment:
+      # TZ is what RESTART_AT is read in - the image carries tzdata, so this is a
+      # real zone and follows DST. The game's own log timestamps are UTC and are
+      # parsed as such, independently of this.
+      - TZ=America/Los_Angeles
+      - VALHEIM_UUID=0fe911ae-87fb-40ea-a1f9-eec00498c5b8
+      - RESTART_AT=03:00
+      # How long past RESTART_AT to keep re-checking when players are on. Ends at
+      # 06:00; a session running that long simply gets no update that night.
+      - WINDOW_MINUTES=180
+      - POLL_SECONDS=300
+    volumes:
+      - ./services/valheim-autoupdate/guard.py:/guard.py:ro
+      # Wings' node token, read from its own config - same single source of truth
+      # as valheim-joincode.
+      - ./services/pterodactyl/wings-etc:/etc/pterodactyl:ro
+      # Which night was already handled, so a recreate mid-window does not fire a
+      # second restart. Also what the Glance monitor probes.
+      - ./services/valheim-autoupdate/state:/srv
+    command: ["python3", "-u", "/guard.py"]
+    labels:
+      - com.centurylinklabs.watchtower.enable=false
+
   # ─── Docker Management ────────────────────────────────────────────────────
 
   portainer:
@@ -899,6 +974,9 @@ services:
       - SPEEDTEST_URL=${SPEEDTEST_URL}
       - SPEEDTEST_TRACKER_API_TOKEN=${SPEEDTEST_TRACKER_API_TOKEN}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
+      # Pterodactyl client (ptlc_) key — the Valheim tile's only data source.
+      # Valheim is UDP 2456/2457, so the monitor widget cannot probe it.
+      - PTERO_CLIENT_API_KEY=${PTERO_CLIENT_API_KEY}
     volumes:
       - ./services/glance/config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro

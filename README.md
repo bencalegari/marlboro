@@ -64,7 +64,7 @@ This guide sets up the following services on a 2018 Mac Mini running Ubuntu 26.0
 | Pterodactyl (panel) | 8091 | Internal container port is 80. Tailnet/LAN only — not proxied |
 | Pterodactyl (wings API) | 8092 | Identity-mapped on purpose: the node's daemon port is also what the browser console dials |
 | Pterodactyl (SFTP) | 2022 | Wings implements SFTP itself; no sshd involved |
-| Valheim (game) | 2456–2457 UDP | Published on the host by the game container. **Forwarded on the router** — crossplay is off, so players direct-connect (see 24.8) |
+| Valheim (game) | 2456–2457 UDP | Published on the host by the game container. Crossplay is on, so players join by code and **no router forward is needed** (see 24.8) |
 | Portainer | 9000 | |
 | Nginx Proxy Manager (admin) | 81 | |
 | Nginx Proxy Manager (http) | 80 | |
@@ -410,10 +410,13 @@ Several widgets pull from external APIs and need credentials in 1Password (vault
 | Marlboro NAS - Sonarr | `api_key` | Sonarr → Settings → General → Security → API Key |
 | Marlboro NAS - Radarr | `api_key` | Radarr → Settings → General → Security → API Key |
 | Marlboro NAS - Tailscale | `api_key` | [tailscale admin → Keys → API access tokens](https://login.tailscale.com/admin/settings/keys) |
+| Marlboro NAS - Pterodactyl Client API | `api_token` | Pterodactyl → avatar → Account → API Credentials → Create (see 24.14) |
 
-`TAILSCALE_HOSTNAME` is auto-populated into `Marlboro NAS - Network` by `setup_script.sh` (pulled from `tailscale status`). `setup_script.sh` writes all four values into `.env`, and `docker-compose.yml` passes them into the Glance container's environment.
+`TAILSCALE_HOSTNAME` is auto-populated into `Marlboro NAS - Network` by `setup_script.sh` (pulled from `tailscale status`). `setup_script.sh` writes all five values into `.env`, and `docker-compose.yml` passes them into the Glance container's environment.
 
 If any 1Password item is missing, `setup_script.sh` prints a warning and that widget renders blank until you add the key.
+
+**Adding a widget that needs a *new* env var is two steps, not one.** Glance watches `glance.yml` and hot-reloads it, but a `${VAR}` it cannot resolve fails the **entire** config, not just that widget — `Config has errors: parsing variable: environment variable X not found`. It keeps serving the last good config, so the dashboard stays up and the failure is silent from the browser; every later `glance.yml` edit is also ignored until the variable exists. So add the variable to `setup_script.sh`'s `.env` heredoc and to the `glance` service's `environment:` in `docker-compose.yml`, then `docker compose up -d glance` (a recreate — `restart` does not pick up new env vars). An empty value is enough to make the config load; the widget itself can then report its own auth failure.
 
 ---
 
@@ -2005,17 +2008,19 @@ built from the node record rather than proxied through the panel. An HTTPS panel
 forces TLS on Wings too (mixed content blocks `ws://` from an `https://` page), which means
 a second cert and a second proxy vhost. Plain HTTP end-to-end over the tailnet keeps
 `ws://` legal and needs no certificate at all. Valheim's game traffic is UDP and could
-never traverse NPM regardless, so it is forwarded straight from the router (24.8).
+never traverse NPM regardless — and with crossplay on it never has to be exposed to the
+internet at all, because the PlayFab relay carries it (24.8).
 
 Pterodactyl publishes **no official Docker install documentation** — only two
 `docker-compose.example.yml` files (see `pterodactyl/documentation#457`). Three of their
 assumptions are wrong on this host; all three are fixed in `docker-compose.yml` and
 explained in 24.13.
 
-Everything up to and including the node, its Wings config and its allocations is scripted
-(24.1, 24.4, 24.5). Three steps stay manual: the **admin user** (needs 1Password, like
-Forgejo), the **egg import** plus **server creation** (both UI-only in panel 1.x), and the
-**router forward** (24.8).
+Everything up to and including the node, its Wings config, its allocations and the
+server's crossplay flag is scripted (24.1, 24.4, 24.5, 24.8). Three steps stay manual: the
+**admin user** (needs 1Password, like Forgejo), the **egg import** plus **server creation**
+(both UI-only in panel 1.x), and the **client API key** that feeds the Glance tile (24.14).
+No router forward is needed while crossplay is on.
 
 ### 24.1 Run the Setup Script
 
@@ -2104,6 +2109,11 @@ work on this host:
   `marlboro_homelab` **already occupies** (172.17 is docker0, 172.19 is coolify). It is
   overridden to `172.22.0.0/16`.
 
+`configure_pterodactyl()` also **pre-creates the `pterodactyl_nw` bridge, IPv4-only.**
+Wings creates that network itself when it is missing, and it creates it with an IPv6 ULA
+subnet — which breaks Valheim on this host (24.13). Wings uses an existing network exactly
+as it finds it, so creating it first is the whole fix.
+
 Then start Wings and confirm the node badge goes green in the panel:
 
 ```bash
@@ -2160,73 +2170,138 @@ Valheim egg.
 
 Egg variables worth setting: `SERVER_NAME`, `WORLD` (default `Dedicated`), `PASSWORD`
 (**5–20 chars, and it must not contain the world name** or Valheim refuses to start),
-`PUBLIC_SERVER=1`, `AUTO_UPDATE=1`, and **`ENABLE_CROSSPLAY=0`** (PC/Steam-only group — see 24.8 for why, and what changes if you set it back to 1).
+`PUBLIC_SERVER=1`, `AUTO_UPDATE=1`, and **`ENABLE_CROSSPLAY=1`** — the last two are
+reconciled by `setup_services.sh` from `PTERO_VALHEIM_AUTO_UPDATE` /
+`PTERO_VALHEIM_CROSSPLAY`, so set those there rather than in the UI (24.8, 24.16).
 
 Start it and watch the console. First boot pulls several GB via SteamCMD. It is ready when
 the console prints **`DungeonDB Start`** (the egg's configured done-string).
 
-### 24.8 External Access — Direct Connect (crossplay off)
+### 24.8 External Access — Join Code (crossplay on)
 
-**Current config: `ENABLE_CROSSPLAY=0`.** The group is PC/Steam-only, so the server runs
-in Steam mode rather than over the PlayFab relay. Set on 2026-09-10, after a crossplay
-session showed relay-teardown noise (see the end of this section).
+**Current config: `ENABLE_CROSSPLAY=1`**, reconciled by `setup_services.sh`
+(`PTERO_VALHEIM_CROSSPLAY`). The server runs over the PlayFab relay, so it is reachable
+from anywhere with **no router forward, no DuckDNS name and no open port** — and it admits
+Xbox/Game Pass players. Restored on 2026-09-10 after the Steam-only configuration below
+turned out to be unreachable from outside this LAN.
 
-In this mode the console logs `Registering lobby` → `Opened Steam server` →
-`Game server connected`, the server appears in the **Valheim community server browser**,
-and players join by direct connect on `marlboro-bc.duckdns.org:2456`. There is **no join
-code** — that is a crossplay/PlayFab feature.
+Players join with the **join code**, printed once per boot:
 
-#### Verifying the game is actually listening
+```bash
+docker logs <server-uuid> 2>&1 | grep -i "registered with join code"
+# 09/11/2026 06:10:24: Session "Valhymen" registered with join code 666894
+```
 
-**Check both address families.** Valheim binds the game port as an IPv6 wildcard socket
-(`[::]:2456`), which serves IPv4 too because `net.ipv6.bindv6only=0`. Reading only
-`/proc/<pid>/net/udp` gives a **false negative** — this cost real debugging time once:
+The code changes on every restart. The console also shows it, and `Opened PlayFab server`
++ `Game server connected` is the healthy-boot signature in this mode. A healthy boot then
+prints the session line with a real address:
+`Session "<name>" with join code <code> and IP <public-ip>:2456 is active`. If that line
+shows an empty IP and the log is filling with `Could not extract valid IP address from
+externalIP download string`, the game network has IPv6 enabled — see 24.13.
+
+Changing the flag is a `setup_services.sh` edit, not a UI click:
+
+```bash
+# PTERO_VALHEIM_CROSSPLAY=1 in setup_services.sh, then:
+./setup_services.sh                      # writes the panel egg variable, idempotent
+docker compose restart wings             # wings re-reads server configs from the panel
+# then stop + start the server from the panel (a restart re-creates the game container,
+# which is what actually picks up the new startup flag)
+```
+
+**Stopping loses anything since the last autosave.** Wings stops this egg with `^C`, and
+the observed shutdown wrote **no** final world save — the last one was 6 minutes earlier,
+and `BACKUP_INTERVAL` is 1800s. Valheim's dedicated server takes no stdin commands, so
+there is no way to force a save first. Stop shortly after a `World save (5/5) done` line,
+or accept losing up to 30 minutes of world changes (player inventories are client-side and
+unaffected).
+
+#### Why crossplay was turned off, and back on
+
+Off on 2026-09-10 for a PC-only group, after a clean 2.5-hour five-player session ended
+with relay-teardown noise as each player quit:
+
+```
+Keep socket for playfab/<id>, try to reconnect before timeout
+PlayFab network error ... code '4098': the operation was called with an invalid handle
+ZRpc timeout detected
+```
+
+Those were harmless quit artifacts — zero network errors in the preceding 2h34m — so the
+only real motive was dropping relay dependency. Back on the same day: in Steam-only mode
+LAN clients connected fine to `192.168.0.10:2456`, but **no off-network player could
+connect at all**, and the server logged no inbound connection attempt in 22 hours. The
+relay costs nothing measurable and needs no NAT cooperation, so the Steam-only path was
+abandoned rather than debugged further.
+
+Saves survive the switch in both directions — the world reloaded with all 66,156 ZDOs and
+its player history intact each time.
+
+#### What was ruled out while the Steam-only mode was failing
+
+Worth keeping, because it applies to any future UDP service here.
+
+**Inbound WAN traffic works in general — this is not CGNAT.** NPM's access log shows
+Twilio reaching 443 from public addresses:
+
+```bash
+docker exec nginx-proxy-manager sh -c 'cat /data/logs/proxy-host-*_access.log' | tail -3
+# [10/Sep/2026:19:00:34 +0000] - 200 ... [Client 3.83.172.168] ... "TwilioProxy/1.1"
+```
+
+DuckDNS was also current (`getent hosts marlboro-bc.duckdns.org` == `curl api.ipify.org`).
+
+**Check both address families when verifying the game is listening.** Valheim binds the
+game port as an IPv6 wildcard socket (`[::]:2456`), which serves IPv4 too because
+`net.ipv6.bindv6only=0`. Reading only `/proc/<pid>/net/udp` gives a **false negative**:
 
 ```bash
 PID=$(docker inspect <uuid> --format '{{.State.Pid}}')
 for f in udp udp6; do
-  echo "-- $f"; tail -n +2 /proc/$PID/net/$f | while read -r sl la rest; do echo $((16#${la#*:})); done | sort -n
+  echo "-- $f"; tail -n +2 /proc/$PID/net/$f | awk '{split($2,a,":"); print a[2]}' \
+    | while read h; do echo $((16#$h)); done | sort -n | uniq
 done
 # crossplay OFF -> udp: 2457 + ephemerals   udp6: 2456      <- game port here
 # crossplay ON  -> udp: 2457 + ephemerals   udp6: (no 2456) <- game port never bound
 ```
 
-That difference is the whole reason the forward is pointless under crossplay and
-meaningful without it.
+Under crossplay the game port is never bound at all, which is why a forward is pointless
+in that mode.
 
-#### Confirming packets actually reach the container
+**The query port answers A2S, and that is a clean LAN-side health probe** (crossplay does
+not change it — 2457 stays bound either way):
 
-Count arrivals inside the container's namespace with `Udp: InDatagrams`. Use a LAN control
-so you can tell a dead forward from a broken probe:
+```bash
+python3 -c "
+import socket,sys
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(4)
+s.sendto(b'\xff\xff\xff\xffTSource Engine Query\x00',(sys.argv[1],2457)); print(s.recvfrom(64)[0])" 192.168.0.10
+# b'\xff\xff\xff\xffA...'  = challenge reply, server is alive
+```
+
+**An inbound UDP forward cannot be tested from inside this LAN.** UDP hairpin (NAT
+loopback) does not work here even though TCP hairpin does: the A2S probe above answers on
+`192.168.0.10` and times out on the public IP, and a `curl --resolve` to the public IP on
+443 returns 302. A near-zero result from inside therefore proves nothing. The only honest
+test is an off-network client.
+
+Counting arrivals inside the container's namespace is the matching check, but note the
+counter is per-netns and includes the Steam/PlayFab ephemeral sockets — baseline drift here
+was ~6 datagrams per 90s with nobody connected:
 
 ```bash
 ind(){ grep -A1 '^Udp:' /proc/$PID/net/snmp | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="InDatagrams") c=i} NR==2{print $c}'; }
-burst(){ python3 -c "
-import socket,sys
-s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-for _ in range(200): s.sendto(b'x'*32,(sys.argv[1],2456))" "$1"; }
-a=$(ind); sleep 4; echo "drift: $(( $(ind) - a ))"                 # expect 0
-c=$(ind); burst 192.168.0.10; sleep 4; echo "LAN:  $(( $(ind) - c ))"   # expect 200
-e=$(ind); burst <public-ip>;   sleep 4; echo "WAN:  $(( $(ind) - e ))"
+a=$(ind); sleep 90; echo "drift: $(( $(ind) - a ))"
 ```
 
-Measured 2026-09-10: drift 0, LAN **200**, WAN **3** (noise). Note `NoPorts` was the right
-counter *only* while 2456 was unbound; once it is bound, `InDatagrams` is the one to use.
+`NoPorts` is the right counter only while 2456 is unbound; once it is bound, use
+`InDatagrams`. The unambiguous signal is the game log itself — a real client attempt prints
+`Got connection SteamID <id>` followed by `Got handshake from client`.
 
-**A near-zero WAN result is NOT proof the forward is broken.** Testing an inbound UDP
-forward from inside the LAN depends on **UDP hairpin** (NAT loopback), which is frequently
-unsupported even where TCP hairpin works — and TCP hairpin *does* work on this router:
+#### Router forward — only needed with crossplay off
 
-```bash
-curl -k --resolve marlboro-bc.duckdns.org:443:<public-ip> https://marlboro-bc.duckdns.org/   # 302
-```
-
-The only honest test of inbound UDP is from **off-network** (a phone on cellular), or
-simply having someone connect.
-
-#### Router forward
-
-Required in this mode. TP-Link BE3600 → Advanced → NAT Forwarding → **Virtual Servers**:
+Not in use. If crossplay is ever set to 0, these two rules become required:
+TP-Link BE3600 → Advanced → NAT Forwarding → **Virtual Servers**:
 
 | External Port | Internal Port | Internal IP | Protocol |
 |---|---|---|---|
@@ -2247,26 +2322,12 @@ upnpc -l | grep -cE '^ *[0-9]+ (TCP|UDP) '                     # 64 = full
 upnpc -l | awk -F"'" '{print $2}' | sort | uniq -c | sort -rn   # 56 are tailscale
 ```
 
+`upnpc -s` also fails to return an external address at all on this router
+(`GetExternalIPAddress failed`), so it is no help for confirming the WAN IP either.
+
 Remember that when debugging *other* services: while the table is full, nothing on this
 LAN can add a UPnP mapping, so an evicted Plex or qBittorrent mapping will not return by
 itself.
-
-#### Why crossplay was turned off
-
-A 2.5-hour session with five players ran clean, then produced this for each player as they
-quit, within the final 13 minutes:
-
-```
-Keep socket for playfab/<id>, try to reconnect before timeout
-PlayFab network error ... code '4098': the operation was called with an invalid handle
-ZRpc timeout detected
-```
-
-Harmless as quit artifacts — zero network errors occurred in the preceding 2h34m — but it
-is relay dependency with no upside for a PC-only group. To go back (e.g. to admit an
-Xbox/Game Pass player), set `ENABLE_CROSSPLAY=1` and restart; the join code returns and the
-router rules become inert again. Saves are unaffected either way — the world reloaded with
-all 66,156 ZDOs and its player history intact across the switch.
 
 ### 24.9 Ports Used
 
@@ -2275,7 +2336,7 @@ all 66,156 ZDOs and its player history intact across the switch.
 | 8091 | Panel web UI (container port 80). Tailnet/LAN only |
 | 8092 | Wings API + console websocket. Port is **identity-mapped** on purpose (see 24.13) |
 | 2022 | Wings SFTP (implemented by Wings itself, no sshd) |
-| 2456–2457 UDP | Valheim game + query. 2456 binds as `[::]:2456` (dual-stack — check `udp6`, not just `udp`). **Forwarded on the router** (24.8) |
+| 2456–2457 UDP | Valheim game + query. Under crossplay only 2457 binds; 2456 binds as `[::]:2456` (dual-stack — check `udp6`, not just `udp`) only with crossplay off. **Not forwarded** (24.8) |
 
 ### 24.10 Recovering a Server Stuck at `installing`
 
@@ -2347,6 +2408,28 @@ docker compose exec -T --user root pterodactyl-panel chown -R nginx:nginx /app/s
 
 ### 24.13 Caveats
 
+- **The game network must be IPv4-only.** Wings creates `pterodactyl_nw` with IPv6 enabled
+  (ULA `fdba:17c8:6c94::/64`). This LAN has router-assigned ULA addresses but **no IPv6
+  egress**, so a game container that holds a v6 address sends Valheim's public-IP probe
+  into a hot loop — `ipv6.icanhazip.com`, `api6.ipify.org`, `ipv6.myip.wtf`, each failing
+  with `This instance has already started one or more requests` (a .NET `HttpClient` reuse
+  bug in the game) and then `Could not extract valid IP address from externalIP download
+  string`. Measured: **~90 log lines/s and ~48% of a core**, with the PlayFab session
+  registered without an IP. Only crossplay triggers it; in Steam mode the game never makes
+  that call, which is why it appeared the moment crossplay went back on. Fix, and what
+  `setup_services.sh` now keeps in place:
+
+  ```bash
+  # stop every game server first - the network cannot be removed while attached
+  docker network rm pterodactyl_nw
+  ./setup_services.sh            # recreates it IPv4-only
+  docker compose restart wings
+  ```
+
+  Verify with `docker network inspect pterodactyl_nw --format '{{.EnableIPv6}}'` (want
+  `false`) and `docker logs <uuid> | grep -c "Could not extract"` (want `0`). With v6 gone
+  the IPv4 probe succeeds and the console prints the real address:
+  `Session "Valhymen" with join code 362087 and IP 98.35.33.57:2456 is active`.
 - **Host path must equal container path.** Wings hands bind-mount *source* paths to the
   host Docker daemon when creating a game container, while also reading those same files
   through its own mount namespace — both views must resolve to the same place. So
@@ -2424,6 +2507,254 @@ docker compose exec -T --user root pterodactyl-panel chown -R nginx:nginx /app/s
   Two further bugs in the panel example, for the record: `MAIL_ENCRYPTION: "true"` is
   invalid (only `tls`/`ssl`/`none`), and `QUEUE_DRIVER` works only as a legacy fallback —
   the current name is `QUEUE_CONNECTION`.
+
+### 24.14 Glance Status Tile (manual — client API key)
+
+Glance shows the Valheim server as a tile in the right-hand column: state, uptime, CPU, RAM
+and the two things a player actually needs — the current **join code** and the server
+**password**. Both come from a subrequest to the watcher in 24.15 rather than from the
+panel: no Pterodactyl API exposes the code at all, and the password is read from Wings so it
+is never duplicated into `.env` or into `glance.yml`. They are deliberately rendered in
+**both** template branches, so a dead panel API (a missing key, say) still shows credentials
+that are perfectly valid. The tile is defined in `services/glance/config/glance.yml` next to the
+Tailscale widget, plus panel bookmarks in the Local and Tailscale groups.
+
+**Why it is not in the `monitor` widget.** That widget is an HTTP prober, and the game is
+UDP 2456/2457 with no web surface. Listing it there would mean probing some unrelated
+endpoint and reporting a status that is not the game's. The panel's **client API** is the
+authoritative source instead:
+
+```
+GET /api/client/servers/<uuidShort>/resources
+-> attributes.current_state, .resources.cpu_absolute, .resources.memory_bytes, .resources.uptime
+```
+
+**`setup_services.sh` mints the key** (`configure_ptero_client_key`), for the admin user
+that owns the server, with **Allowed IPs blank** — Glance fetches server-side from the
+`homelab` Docker network, so an allowlist that omits that subnet 403s the widget with no
+visible error beyond a blank tile. Only the storing is manual, because it is the one part
+that lives in an external account:
+
+```bash
+./setup_services.sh     # prints the key whenever .env does not already carry it
+# store it in 1Password as item 'Marlboro NAS - Pterodactyl Client API', field api_token
+./setup_script.sh       # rewrites .env from 1Password
+docker compose up -d glance
+```
+
+`up -d`, not `restart` — a new environment variable needs a container recreate. And
+1Password is not optional bookkeeping here: `setup_script.sh` rebuilds `.env` from it on
+every run, so a key that exists only in `.env` is erased by the next run of that script.
+That is exactly how the tile broke on 2026-09-12 — `PTERO_CLIENT_API_KEY` was blank, no
+client key existed in the panel at all, and the tile rendered `panel API 401` while the
+join code (a different source — 24.15) kept showing correctly.
+
+**Re-running is safe, and never mints a second key.** Panel 1.x has no `p:user:api-key`
+command — consistent with the missing egg, nest and allocation commands in 24.5 — but this
+never needed the UI: `api_keys` stores the identifier in the clear and the remainder
+encrypted with `APP_KEY`, so the script recovers the full key
+(`$key->identifier . decrypt($key->token)`) from an existing row instead of issuing a new
+one. To deliberately rotate it, delete the key in **Account → API Credentials** and re-run.
+
+**It must be a client (`ptlc_`) key.** The Application (`ptla_`) key under Admin →
+Application API is *not* interchangeable: that API can list servers but has no resources
+endpoint, so it cannot report whether one is running.
+
+**The server identifier is hardcoded** in `glance.yml` as `0fe911ae` (`servers.uuidShort`,
+not a secret). It is stable for the life of the server and changes only if the server is
+deleted and recreated. Re-read it from the panel console URL, or:
+
+```bash
+# ptero_sql is defined in setup_services.sh
+docker compose exec -T pterodactyl-db mariadb -N -B -u root -p"$PTERO_DB_ROOT_PASSWORD" \
+  panel -e 'SELECT id,uuidShort,name FROM servers;'
+```
+
+Units in that response are **not** uniform, which is worth knowing before editing the
+template: `memory_bytes` is bytes, `limits.memory` is MiB, and `uptime` is milliseconds.
+Every resource field also reads `0` while the server is stopped, so the tile gates the
+CPU/RAM rows on `current_state` rather than rendering zeros.
+
+### 24.15 Join Code Watcher (`valheim-joincode`)
+
+Crossplay means players join with a **code, not an address** — and the code is awkward to
+get at. The game prints it exactly once, at boot:
+
+```
+09/11/2026 06:18:31: Session "Valhymen" registered with join code 362087
+```
+
+It then changes on every restart. Pterodactyl's client API exposes no logs at all (the
+panel console is a Wings websocket, not a REST resource), and Wings' own
+`GET /api/servers/<uuid>/logs` returns only the last **~100 lines** — about two hours on an
+idle server, minutes with players on. Wait too long and the code is simply gone; the only
+way to recover it then is to restart the server and take a different one.
+
+The **server name and password** are not in the log at all. They are egg variables, and
+Wings serves the egg's resolved environment at `GET /api/servers/<uuid>` under
+`configuration.environment` — so they are read from there rather than copied into `.env`.
+The panel stays the single source of truth: change the password in the panel and the
+dashboard follows on the next poll, with no file to edit and no secret in this repo.
+
+So `valheim-joincode` polls Wings every 60s and publishes whatever changed:
+
+1. `services/valheim-joincode/www/joincode.json` — `{code, server, password, captured}`,
+   served over HTTP on port 8099 (container-internal only) for the Glance tile in 24.14;
+2. a push to the **`valheim` ntfy topic** carrying the code and the password. Subscribe to
+   that topic in the ntfy app to get them on your phone whenever the code changes.
+
+Only a **new code** notifies. A password edit reaches the tile silently, and a restart that
+comes back with the same code sends nothing — codes are not unique per boot, which is
+observed behaviour, not an assumption: the 2026-09-12 restarts produced `666894` twice in a
+row after an earlier boot had produced `362087`.
+
+Stock `python:3.13-alpine` running one authored script, `watch.py`; the whole job is
+stdlib, so there is nothing to build and no packages installed at boot. Plain `alpine` is
+not enough — its BusyBox is compiled without the `httpd` applet (it lives in
+`busybox-extras`), and a runtime `apk add` would make container start depend on the
+network.
+
+It reads Wings' node token straight from `services/pterodactyl/wings-etc/config.yml`,
+mounted read-only, rather than copying it into `.env` — the file is the authoritative copy,
+so rotating the token needs no second edit.
+
+**State, and why the notification is not chatty.** The last known code lives in that JSON
+file, which is mounted from the host and therefore survives a container recreate. Only a
+*different* code triggers a write and a push, so restarting the watcher, or the game server
+coming back with the same session, sends nothing.
+
+**Seeding an already-running server.** Deploying the watcher while the server has been up
+for hours finds nothing — the boot line has long scrolled out of Wings' window. Either
+restart the server, or seed the state file with the code you already have:
+
+```bash
+docker exec valheim-joincode python3 -c "
+import sys; sys.path.insert(0,'/')
+import watch
+state = dict(watch.server_env(watch.wings_token()), code='362087')
+print(watch.store(state))"
+```
+
+`watch.push(watch.load_state())` sends the ntfy message on its own, which is also the
+quickest way to prove that half of the path works.
+
+**Checking it:**
+
+```bash
+docker logs valheim-joincode              # 'watching <uuid> every 60s (known code: ...)'
+docker exec glance wget -q -O - http://valheim-joincode:8099/joincode.json
+curl -s 'http://192.168.0.10:8194/valheim/json?poll=1'   # what ntfy has cached (12h)
+```
+
+**Limits worth knowing.** Neither value is a secret from anyone who can already open the
+dashboard, which is tailnet/LAN-only — that is the point of putting the password there. If
+the watcher is down while the game server restarts, and stays down past the ~100-line
+window, that boot's code is missed and the tile keeps showing the stale one — the game gives no way to re-read it. The Glance monitor entry (24.14) is there
+to make a dead watcher visible. The `VALHEIM_UUID` in `docker-compose.yml` is the **full**
+`servers.uuid`, unlike the tile's `uuidShort`; Wings' API is keyed by the full one.
+
+### 24.16 Nightly Auto-Update
+
+Valheim refuses a client whose build is newer than the server's, so a long-lived server
+quietly rots out of reach of everyone who launches the game through Steam. Observed on
+2026-09-12: 37 hours of uptime, server on `l-1.0.7` (network version 39), and a player
+locked out with a version-mismatch error.
+
+**Restarting *is* the update mechanism.** The egg's image entrypoint runs
+`steamcmd +app_update ${SRCDS_APPID}` on every container start whenever `AUTO_UPDATE=1`,
+and there is no in-place updater — the dedicated server takes no stdin commands. So
+"auto-update" here means "restart on a schedule":
+
+| Half | Where | Value |
+|---|---|---|
+| SteamCMD runs on every boot | `PTERO_VALHEIM_AUTO_UPDATE` in `setup_services.sh` → egg variable `AUTO_UPDATE` | `1` |
+| Something restarts it nightly | `valheim-autoupdate` container (24.17) | 03:00 local, only while empty |
+
+**Why the restart is not a panel schedule.** Pterodactyl can restart on a cron, and this
+stack did that for a few hours — the code is still in the git history. Its only
+precondition is `only_when_online`, which asks Wings whether the process is up; it says
+nothing about whether anyone is *playing*, because Pterodactyl has no game-query support
+and so exposes no player count anywhere in its API. A 3 AM restart on top of a live
+session kicks everyone and drops up to `BACKUP_INTERVAL` (1800s) of world state (24.8), so
+the trigger moved to a container that can read the player count off the server's own
+console. `setup_services.sh` now *deletes* a panel schedule named `Nightly update restart`
+if it finds one, since two triggers would restart the server twice.
+
+### 24.17 Empty-Server Guard (`valheim-autoupdate`)
+
+`services/valheim-autoupdate/guard.py`, same shape as the join-code watcher (24.15): the
+stock `python:3.13-alpine` image running one authored stdlib script, reading Wings' node
+token straight out of `services/pterodactyl/wings-etc/config.yml` rather than keeping a
+second copy in `.env`.
+
+Once a night, from `RESTART_AT` onward, it asks two questions and restarts only on a clear
+yes to both:
+
+1. **Is the server running?** `GET /api/servers/<uuid>` → `state`. Anything but `running`
+   ends the night: a stopped server runs SteamCMD whenever it is next started, so there is
+   nothing to miss.
+2. **Is anyone on it?** The count comes from the console line the server prints every ten
+   minutes, which is the *only* place it exists:
+
+   ```
+   09/12/2026 19:28:54:  Connections 0 ZDOS:66156  sent:0 recv:0
+   ```
+
+   Read via Wings' `/api/servers/<uuid>/logs?size=100`. With players on it waits and asks
+   again every `POLL_SECONDS`, up to `WINDOW_MINUTES` past `RESTART_AT` (03:00 → 06:00); a
+   session that outlasts the window simply gets no update that night.
+
+Then `POST /api/servers/<uuid>/power {"action":"restart"}`, again on the node token — the
+panel needs no involvement, since it reads server state from Wings anyway.
+
+**Every unknown counts as "someone might be on."** No `Connections` line in the window, a
+line older than `MAX_LINE_AGE_SECONDS` (25 minutes — they come every 10), an unparseable
+one, an unreachable Wings: all of them skip. A skipped night costs nothing; a wrong restart
+lands on live players.
+
+| Environment | Default | Notes |
+|---|---|---|
+| `RESTART_AT` | `03:00` | Read in the container's `TZ`; the image carries tzdata, so it follows DST. Must not put the window across midnight |
+| `WINDOW_MINUTES` | `180` | How long to keep retrying while players are on |
+| `POLL_SECONDS` | `300` | Retry interval inside the window |
+| `MAX_LINE_AGE_SECONDS` | `1500` | Freshness bar for the `Connections` line |
+| `VALHEIM_UUID` | — | The **full** `servers.uuid`, like the watcher's; Wings' API is keyed by it |
+
+**The game's log timestamps are UTC**, whatever `TZ` says — the game container gets no
+timezone from Wings. That is why the line is parsed as UTC while `RESTART_AT` is local; do
+not "align" them.
+
+**State** lives in `services/valheim-autoupdate/state/autoupdate.json`, mounted from the
+host so a container recreate mid-window cannot fire a second restart. It is also what the
+Glance monitor entry probes (a dead guard means the game silently stops updating):
+
+```bash
+docker logs valheim-autoupdate           # 'guarding <uuid>: restart at 03:00 local when empty...'
+docker exec glance wget -q -O - http://valheim-autoupdate:8098/autoupdate.json
+# {"status": "restarted while empty", "updated": "...", "done_for": "2026-09-12"}
+```
+
+`status` is one of `idle`, `waiting: N online`, `restarted while empty`, `skipped: server
+offline`, `skipped: players on all window`. `done_for` is the date already handled.
+
+**Testing it without waiting for 3 AM** — a throwaway container with the window moved to a
+minute from now, which leaves the running one alone (stop it first so the two do not both
+act, and clear the state file so "tonight" counts as unhandled):
+
+```bash
+docker compose stop valheim-autoupdate
+rm -f services/valheim-autoupdate/state/autoupdate.json
+docker compose run --rm --no-deps \
+  -e RESTART_AT="$(date -d '+1 minute' '+%H:%M')" -e WINDOW_MINUTES=8 -e POLL_SECONDS=20 \
+  valheim-autoupdate
+# then confirm the restart actually pulled an update:
+docker logs <server-uuid> 2>&1 | grep -aE "Success! App '896660'|Valheim version:"
+docker compose up -d valheim-autoupdate
+```
+
+**Expect a join code push every morning** (24.15) — the code rotates on every boot, so a
+nightly restart means a nightly ntfy notification with the new one. That is the guard
+working, not the watcher misfiring.
 
 ---
 
