@@ -1,33 +1,21 @@
 services:
 
-  # ─── Media Server ─────────────────────────────────────────────────────────
 
   jellyfin:
     container_name: jellyfin
-    # Minor-pinned so Watchtower patches 10.11.x but won't jump to 10.12/next major.
     image: jellyfin/jellyfin:10.11
     restart: unless-stopped
     labels:
       - com.centurylinklabs.watchtower.scope=homelab
-    network_mode: host  # required for DLNA auto-discovery
+    network_mode: host
     environment:
       - TZ=America/Los_Angeles
     volumes:
       - ./services/jellyfin/config:/config
       - /mnt/tank/media:/media
     devices:
-      - /dev/dri:/dev/dri  # Intel UHD 630 QuickSync hardware transcode
+      - /dev/dri:/dev/dri
 
-  # Plex — second media server alongside Jellyfin, linked to an existing plex.tv
-  # account. Host networking (like Jellyfin) for GDM discovery + direct remote
-  # access on :32400. PLEX_CLAIM links THIS server instance to the account on
-  # first start ONLY (token from https://plex.tv/claim, valid 4 min); it stays
-  # blank in .env afterward and the permanent server token lives in
-  # ./services/plex/config. /dev/dri enables Intel QuickSync HW transcode — needs
-  # an active Plex Pass (this account's pass expires Nov 2026; transcode falls
-  # back to CPU after that). NOTE: both servers want UDP 1900 (DLNA/SSDP) under
-  # host networking — if DLNA is enabled on both they conflict; leave Plex DLNA
-  # off (the default).
 
   plex:
     container_name: plex
@@ -46,9 +34,8 @@ services:
       - ./services/plex/config:/config
       - /mnt/tank/media:/media
     devices:
-      - /dev/dri:/dev/dri  # Intel UHD 630 QuickSync (Plex Pass only; expires Nov 2026)
+      - /dev/dri:/dev/dri
 
-  # ─── DNS / Ad Blocking ────────────────────────────────────────────────────
 
   adguard:
     container_name: adguard
@@ -61,13 +48,12 @@ services:
     ports:
       - "53:53/tcp"
       - "53:53/udp"
-      - "3000:3000"   # initial setup wizard
-      - "3001:3001"   # web UI after setup
+      - "3000:3000"
+      - "3001:3001"
     volumes:
       - ./services/adguard/work:/opt/adguardhome/work
       - ./services/adguard/conf:/opt/adguardhome/conf
 
-  # ─── Cloudflare Bypass Proxy ──────────────────────────────────────────────
 
   flaresolverr:
     container_name: flaresolverr
@@ -83,7 +69,6 @@ services:
     ports:
       - "8191:8191"
 
-  # ─── Indexer Manager ──────────────────────────────────────────────────────
 
   prowlarr:
     container_name: prowlarr
@@ -102,7 +87,6 @@ services:
     ports:
       - "9696:9696"
 
-  # ─── Movie Manager ────────────────────────────────────────────────────────
 
   radarr:
     container_name: radarr
@@ -124,7 +108,6 @@ services:
     ports:
       - "7878:7878"
 
-  # ─── TV Manager ───────────────────────────────────────────────────────────
 
   sonarr:
     container_name: sonarr
@@ -146,7 +129,6 @@ services:
     ports:
       - "8989:8989"
 
-  # ─── Subtitle Downloader ──────────────────────────────────────────────────
 
   bazarr:
     container_name: bazarr
@@ -169,15 +151,9 @@ services:
     ports:
       - "6767:6767"
 
-  # ─── Quality Profile Sync ─────────────────────────────────────────────────
 
   profilarr:
     container_name: profilarr
-    # Upstream moved orgs (santiagosayshey -> Dictionarry-Hub); Docker Hub image
-    # abandoned pre-2.0.9. GHCR publishes semver tags 2.0.0-2.0.9 (2.0.9 == latest;
-    # no rolling 2.0/2/stable tags). Pinned tag@digest: readable version + immutable
-    # digest, per the data-bearing-service pin policy. To bump: pick a newer tag and
-    # re-resolve its digest (docker pulls by digest, tag is informational).
     image: ghcr.io/dictionarry-hub/profilarr:2.0.9@sha256:7a9b5112ff227320d17c65ab643a5d875713e6235991ef04a8e482ec51427902
     restart: unless-stopped
     labels:
@@ -193,7 +169,6 @@ services:
     ports:
       - "6868:6868"
 
-  # ─── Media Request Management ─────────────────────────────────────────────
 
   seerr:
     container_name: seerr
@@ -223,19 +198,6 @@ services:
       interval: 15s
       retries: 3
 
-  # ─── SMS Requests ─────────────────────────────────────────────────────────
-  # Text a title to the Twilio number -> numbered matches back -> reply with a
-  # number -> Seerr request -> a text when it lands in Jellyfin. See README
-  # "SMS Requests" for the Twilio account + toll-free verification steps.
-  #
-  # Stock python image with the script bind-mounted (stdlib only, no pip, no
-  # Dockerfile) — same shape as ntfy/Glance: stock image + authored config.
-  #
-  # Only /twilio/inbound is public (NPM 404s the rest on sms.marlboro-bc.duckdns.org
-  # — see NPM_HOSTS in setup_services.sh). /seerr/hook and /healthz are LAN/tailnet
-  # only. Seerr's settings.json is mounted read-only purely to read main.apiKey,
-  # mirroring seerr_key() in setup_services.sh. Pinned + Watchtower-fenced: it
-  # holds a SQLite session/dedupe DB (see README Watchtower policy).
   sms-bridge:
     container_name: sms-bridge
     image: python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
@@ -264,7 +226,7 @@ services:
     depends_on:
       - seerr
     labels:
-      - com.centurylinklabs.watchtower.enable=false   # session DB — pin, don't auto-update
+      - com.centurylinklabs.watchtower.enable=false
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz',timeout=3).read()==b'ok' else 1)\""]
       start_period: 10s
@@ -272,13 +234,6 @@ services:
       interval: 30s
       retries: 3
 
-  # ─── Push Notifications ───────────────────────────────────────────────────
-  # Self-hosted ntfy — pub/sub push. In-stack services publish to it at
-  # http://ntfy:80 (Profilarr sends quality-profile drift alerts here). Subscribe
-  # from the ntfy phone/web app pointed at this server over LAN / Tailscale.
-  # NOT exposed via NPM: default access is open read-write, so keep it network-
-  # gated (same posture as Flood/qBittorrent). Pinned + Watchtower-fenced — it
-  # holds a message cache DB (see README Watchtower policy).
   ntfy:
     container_name: ntfy
     image: binwiederhier/ntfy:2.26.0@sha256:a6d335064ae927c4dbef118e1fa39656b3d2e01472b2a82af5915d5cebfe815f
@@ -294,7 +249,7 @@ services:
     ports:
       - "8194:80"
     labels:
-      - com.centurylinklabs.watchtower.enable=false   # cache DB — pin, don't auto-update
+      - com.centurylinklabs.watchtower.enable=false
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:80/v1/health 2>/dev/null | grep -q '\"healthy\":true' || exit 1"]
       start_period: 10s
@@ -302,9 +257,6 @@ services:
       interval: 30s
       retries: 3
 
-  # ─── Torrent Client ───────────────────────────────────────────────────────
-  # BitTorrent engine. Its built-in WebUI lives at :8181; the day-to-day UI is
-  # Flood (below), which talks to the same Web API at qbittorrent:8080.
 
   qbittorrent:
     container_name: qbittorrent
@@ -327,16 +279,6 @@ services:
       - "6881:6881/udp"
       - "8181:8080"
 
-  # ─── Torrent Web UI ───────────────────────────────────────────────────────
-  # Flood is a standalone web UI for qBittorrent — a separate container, NOT a
-  # qBittorrent WebUI mod (it replaces the old gabe565 VueTorrent DOCKER_MOD).
-  # auth=none disables Flood's own user management and reads the qBittorrent
-  # connection from the env vars below; QBIT_PASSWORD is the same value
-  # setup_script.sh seeds into qBittorrent.conf, so the two stay in sync.
-  # Access is gated at the network layer (LAN / Tailscale / NPM).
-  # Runs as 1000:1000 (jesec/flood has no PUID/PGID) so /data and /downloads
-  # ownership matches the rest of the stack; HOME=/data keeps stray writes in
-  # the mounted volume.
 
   flood:
     container_name: flood
@@ -364,19 +306,6 @@ services:
     depends_on:
       - qbittorrent
 
-  # ─── Archive Extractor ────────────────────────────────────────────────────
-  # Sonarr/Radarr detect but never unpack scene-style multi-part .rar/.zip
-  # releases — they sit in the queue as "Found archive file, might need to be
-  # extracted" and never import. Unpackerr watches the Sonarr/Radarr queues,
-  # extracts those archives in place, lets the *arr import the result, then
-  # deletes the extracted copies once the queue item clears. No web UI — it's a
-  # background worker configured entirely via env (no mounted config file).
-  # Reuses the existing Sonarr/Radarr API keys from .env (same ones Glance
-  # uses), so no new credentials are needed. The mount MUST match the path
-  # Sonarr/Radarr use — all three share the single /mnt/tank:/data mount and
-  # reference /data/downloads, so Unpackerr can find the files the queue
-  # references. Runs as 1000:1000 (like Flood) so extracted files are owned
-  # consistently and the *arr can import them.
 
   unpackerr:
     container_name: unpackerr
@@ -401,16 +330,13 @@ services:
       - sonarr
       - radarr
 
-  # ─── Photo Management ─────────────────────────────────────────────────────
 
   immich-server:
     container_name: immich-server
-    # Pinned: Immich ships breaking DB migrations across majors. Bump this and
-    # immich-machine-learning together, on purpose, after reading release notes.
     image: ghcr.io/immich-app/immich-server:v3.0.1
     restart: unless-stopped
     labels:
-      - com.centurylinklabs.watchtower.enable=false   # never auto-update; see comment above
+      - com.centurylinklabs.watchtower.enable=false
     networks:
       - homelab
     environment:
@@ -433,7 +359,6 @@ services:
 
   immich-machine-learning:
     container_name: immich-machine-learning
-    # Keep in lockstep with immich-server's tag.
     image: ghcr.io/immich-app/immich-machine-learning:v3.0.1
     restart: unless-stopped
     labels:
@@ -456,9 +381,6 @@ services:
 
   immich-postgres:
     container_name: immich-postgres
-    # Immich-maintained image bundling vchord + pgvecto.rs + pgvector so v3 can
-    # auto-migrate the old `vectors` data to VectorChord (`vchord`) on first boot.
-    # Pinned major (pg14) — matches existing on-disk data. Do not float this tag.
     image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
     restart: unless-stopped
     shm_size: 128mb
@@ -473,12 +395,9 @@ services:
     volumes:
       - ./services/immich/postgres:/var/lib/postgresql/data
 
-  # ─── ROM Manager ──────────────────────────────────────────────────────────
 
   romm-db:
     container_name: romm-db
-    # Major-pinned: mariadb:latest floats across DB-engine majors, which won't
-    # start on an old data dir. Stays in 12.x; bump deliberately + back up first.
     image: mariadb:12
     restart: unless-stopped
     labels:
@@ -501,7 +420,6 @@ services:
 
   romm:
     container_name: romm
-    # Major-pinned (next major 5.0 ships DB migrations). Bump with romm-db in mind.
     image: rommapp/romm:4
     restart: unless-stopped
     labels:
@@ -530,29 +448,9 @@ services:
       romm-db:
         condition: service_healthy
 
-  # ─── Game Server Panel ────────────────────────────────────────────────────
-  # Pterodactyl: a web panel (this stack) that drives a Wings node daemon, which
-  # in turn creates one Docker container per game server on the HOST daemon.
-  # Runs a Valheim server — see README Part 24.
-  #
-  # Tailnet-only by design, so there is deliberately no NPM proxy host and no
-  # cert anywhere in this stack. That is not just a scope choice: Pterodactyl's
-  # browser console opens a websocket DIRECTLY to Wings at
-  # ws(s)://<node fqdn>:<daemon port>/api/servers/<uuid>/ws, built from the node
-  # record — not proxied through the panel. An https panel would therefore force
-  # TLS on Wings too (mixed content), which is the usual source of pain here.
-  # Plain HTTP end-to-end keeps ws:// legal and needs no certificate.
-  #
-  # Pterodactyl publishes no official Docker install docs (only two
-  # docker-compose.example.yml files); three of their assumptions are wrong on
-  # this host and are corrected in the wings block below.
 
   pterodactyl-db:
     container_name: pterodactyl-db
-    # Major-pinned, same reasoning as romm-db: mariadb:latest floats across
-    # DB-engine majors and won't start on an old data dir. Panel needs >= 10.2.
-    # The upstream example's --default-authentication-plugin=mysql_native_password
-    # is a MySQL 8 caching_sha2 workaround and is not needed (or wanted) here.
     image: mariadb:11
     restart: unless-stopped
     networks:
@@ -565,7 +463,7 @@ services:
     volumes:
       - ./services/pterodactyl/db:/var/lib/mysql
     labels:
-      - com.centurylinklabs.watchtower.enable=false   # panel DB — pin, don't auto-update
+      - com.centurylinklabs.watchtower.enable=false
     healthcheck:
       test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
       start_period: 30s
@@ -575,15 +473,12 @@ services:
 
   pterodactyl-cache:
     container_name: pterodactyl-cache
-    # Cache/session/queue backend. No password: bridge-only, never published,
-    # same posture as immich-redis. No volume — nothing here needs to survive a
-    # restart (sessions re-issue, queued jobs are re-dispatched).
     image: redis:7-alpine
     restart: unless-stopped
     networks:
       - homelab
     labels:
-      - com.centurylinklabs.watchtower.enable=false   # pinned alongside the panel
+      - com.centurylinklabs.watchtower.enable=false
     healthcheck:
       test: [CMD, redis-cli, ping]
       interval: 10s
@@ -592,35 +487,18 @@ services:
 
   pterodactyl-panel:
     container_name: pterodactyl-panel
-    # Pinned: the panel runs Laravel DB migrations on every boot, so a surprise
-    # major would migrate the DB out from under you. Bump deliberately, with a
-    # services/pterodactyl/db backup first.
-    #
-    # No separate queue-worker or cron container is needed: this image runs
-    # supervisord (php-fpm, nginx, queue:work --queue=high,standard,low) and
-    # bakes `artisan schedule:run` into root's crontab. The entrypoint also waits
-    # for the DB and runs `migrate --seed --force` itself.
     image: ghcr.io/pterodactyl/panel:v1.15.1
     restart: unless-stopped
     networks:
       - homelab
-    # The panel reaches the node at its FQDN + daemonListen (it does NOT use the
-    # container name), so it needs the same MagicDNS shim as wings — otherwise
-    # every panel->wings call fails and creating a server 500s after the DB row is
-    # already committed. Both directions need this; fixing only one is a trap.
     extra_hosts:
       - "marlboro.tail314238.ts.net:host-gateway"
     environment:
       - TZ=America/Los_Angeles
-      # Must be the tailnet hostname, not an IP: the panel hands this to the
-      # browser and derives the Wings console websocket URL from the node record.
       - APP_URL=http://marlboro.tail314238.ts.net:8091
       - APP_ENV=production
       - APP_ENVIRONMENT_ONLY=false
       - APP_TIMEZONE=America/Los_Angeles
-      # Pinned in .env, NOT left to the image. The entrypoint self-generates a key
-      # when this is unset, and APP_KEY decrypts every Wings node's daemon token —
-      # a regenerated key takes all nodes offline. Same reason /app/var persists.
       - APP_KEY=${PTERO_APP_KEY}
       - APP_SERVICE_AUTHOR=bencalegari@navapbc.com
       - HASHIDS_SALT=${PTERO_HASHIDS_SALT}
@@ -631,21 +509,13 @@ services:
       - DB_PASSWORD=${PTERO_DB_PASSWORD}
       - CACHE_DRIVER=redis
       - SESSION_DRIVER=redis
-      # QUEUE_CONNECTION, not the example's QUEUE_DRIVER — that name only still
-      # works as a legacy fallback in config/queue.php.
       - QUEUE_CONNECTION=redis
       - REDIS_HOST=pterodactyl-cache
       - REDIS_PORT=6379
-      # No mail: log driver writes to storage/logs instead. (Do not copy the
-      # upstream example's MAIL_ENCRYPTION="true" — only tls/ssl/none are valid.)
       - MAIL_MAILER=log
       - MAIL_FROM_ADDRESS=noreply@marlboro-bc.duckdns.org
       - RECAPTCHA_ENABLED=false
-      # LE_EMAIL intentionally unset: setting it makes the entrypoint swap in the
-      # SSL nginx config and run `certbot --standalone`, which would fail here and
-      # fight NPM for :80. Unset = plain-HTTP vhost, which is what we want.
     volumes:
-      # /app/var holds the panel's own generated .env — must persist (see APP_KEY).
       - ./services/pterodactyl/panel-var:/app/var
       - ./services/pterodactyl/panel-logs:/app/storage/logs
     ports:
@@ -656,10 +526,7 @@ services:
       pterodactyl-cache:
         condition: service_healthy
     labels:
-      - com.centurylinklabs.watchtower.enable=false   # runs DB migrations on boot
-    # Gates wings' start (below). Wings EXITS FATALLY if it can't reach the panel
-    # on boot, so "panel container started" isn't a strong enough signal — it has
-    # to be serving. start_period covers the entrypoint's migrate --seed run.
+      - com.centurylinklabs.watchtower.enable=false
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost/auth/login || exit 1"]
       start_period: 120s
@@ -669,25 +536,10 @@ services:
 
   wings:
     container_name: wings
-    # Pinned: wings and the panel negotiate a versioned API; a floating wings can
-    # outrun the panel and drop the node offline. Bump the pair together.
-    #
-    # Wings is NOT docker-in-docker. It is a sibling orchestrator: it talks to the
-    # HOST daemon over docker.sock to create/start/stop each game container, pull
-    # egg images and run installers. It needs no --privileged.
-    #
-    # Distroless image: no shell, so `docker exec` debugging is impossible — use
-    # `docker run --rm --entrypoint /usr/bin/wings ...`. The upstream example's
-    # WINGS_UID/WINGS_GID/WINGS_USERNAME are stale leftovers from the old Alpine
-    # image and are inert here; omitted.
     image: ghcr.io/pterodactyl/wings:v1.13.3
     restart: unless-stopped
     networks:
       - homelab
-    # `remote` in config.yml is the panel's APP_URL — a MagicDNS name that
-    # container DNS (1.1.1.1/8.8.8.8 per daemon.json) cannot resolve. Same idiom
-    # the arr stack uses to reach host-networked services: point the name at the
-    # host gateway and hit the published 8091.
     extra_hosts:
       - "marlboro.tail314238.ts.net:host-gateway"
     tty: true
@@ -695,71 +547,21 @@ services:
       - TZ=America/Los_Angeles
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      # ── Identity mounts (host path == container path). NOT stylistic. ──
-      # Wings passes bind-mount SOURCE paths to the host daemon when creating a
-      # game container, while also reading those files through its own mount
-      # namespace. Both views must resolve to the same place, so these cannot be
-      # remapped. Getting it wrong yields servers that install into an empty
-      # directory, or "no such file or directory" on container create.
-      #
-      # config.yml sets root_directory here (volumes/ archives/ backups/ logs/),
-      # so this one mount covers all of them and keeps world backups off the
-      # 30 GB root disk.
       - /mnt/tank/pterodactyl:/mnt/tank/pterodactyl
-      # tmp_directory: install containers bind-mount it, so it is identity mapped
-      # too. Stays on /tmp by design — short-lived scratch.
       - /tmp/pterodactyl:/tmp/pterodactyl
-      # Log tailing for the web console. The upstream example says
-      # /var/lib/docker/containers, but /etc/docker/daemon.json relocates
-      # data-root to /mnt/tank/docker — copied verbatim that path is EMPTY here
-      # and the console shows nothing, with no error anywhere.
       - /mnt/tank/docker/containers:/mnt/tank/docker/containers
-      # Also an identity mount, and easy to get wrong: wings writes a per-server
-      # machine-id under /run/wings/machine-id/<uuid> and bind-mounts THAT into the
-      # game container, so the host daemon has to resolve it too. Mapping it under
-      # services/ instead fails at container create with
-      # "bind source path does not exist: /run/wings/machine-id/<uuid>".
-      # /run is tmpfs, so the dir is wiped each boot and re-created by dockerd on
-      # container start — that's fine, the contents are per-boot scratch.
       - /run/wings:/run/wings
-      # ── Internal-only path: never handed to the host daemon, so it is free to
-      # live under services/ like every other service's state. ──
       - ./services/pterodactyl/wings-etc:/etc/pterodactyl
-      # Lets wings validate the panel's cert. Harmless on plain HTTP; keep it so
-      # switching the panel to https later doesn't fail confusingly.
       - /etc/ssl/certs:/etc/ssl/certs:ro
     ports:
-      # Identity mapping is required, not cosmetic: the node's daemonListen is
-      # BOTH the port wings binds inside the container (api.port) AND the port the
-      # panel embeds in the console websocket URL the browser opens. Host 8080 is
-      # Glance, so the node is configured for 8092 and this maps straight through.
-      # "8092:8080" would leave the browser dialling a port nothing listens on.
       - "8092:8092"
-      - "2022:2022"   # SFTP — wings implements it itself, no sshd involved
+      - "2022:2022"
     depends_on:
-      # Must be service_healthy, not just started: wings calls
-      # GET <remote>/api/remote/servers on boot and treats a connection refusal as
-      # FATAL, exiting immediately. It does recover (restart: unless-stopped, and it
-      # re-attaches to a still-running game container rather than restarting it), but
-      # it crash-loops in the meantime and the node shows offline in the panel.
-      # NOTE: docker restart policies do not honour depends_on, so after a HOST
-      # reboot wings can still lose the race and briefly crash-loop until the panel
-      # is serving. That is expected and self-healing.
       pterodactyl-panel:
         condition: service_healthy
     labels:
-      # Unlabelled by scope on purpose (see WATCHTOWER_SCOPE on the watchtower
-      # service): wings-created game containers use floating egg images, and
-      # Watchtower must never recreate a running game server.
       - com.centurylinklabs.watchtower.enable=false
 
-  # Publishes the Valheim join code, which the game prints exactly once per boot
-  # and changes on every restart (README 24.15). Polls Wings' /logs route, whose
-  # window is only ~100 lines, writes the code to a JSON file for the Glance tile
-  # and pushes it to ntfy. Stock Python image running one authored script: the
-  # whole job is stdlib (urllib + http.server), so there is nothing to build and
-  # no packages to install at boot. Plain Alpine cannot do it - its BusyBox is
-  # built without the httpd applet, which lives in busybox-extras.
   valheim-joincode:
     container_name: valheim-joincode
     image: python:3.13-alpine@sha256:7415fbc3c9e4979cc717d92377ab2bc7b2b4a2af1ac03cc52b5f3f88efedaf3a
@@ -771,32 +573,17 @@ services:
       - ntfy
     environment:
       - TZ=America/Los_Angeles
-      # servers.uuid, not uuidShort - Wings' API is keyed by the full UUID.
       - VALHEIM_UUID=0fe911ae-87fb-40ea-a1f9-eec00498c5b8
       - NTFY_TOPIC=valheim
       - POLL_SECONDS=60
     volumes:
       - ./services/valheim-joincode/watch.py:/watch.py:ro
-      # Wings' node token lives in its config; mounted read-only so the token is
-      # not copied into .env as a second source of truth.
       - ./services/pterodactyl/wings-etc:/etc/pterodactyl:ro
-      # Captured code. A named path rather than a volume so the state survives a
-      # recreate and can be read from the host while debugging.
       - ./services/valheim-joincode/www:/srv
     command: ["python3", "-u", "/watch.py"]
     labels:
-      # Pinned by digest and unlabelled by scope: this is a two-file service with
-      # no upstream to track, and a Python point bump would gain it nothing.
       - com.centurylinklabs.watchtower.enable=false
 
-  # Keeps the Valheim build current (README 24.17). Restarting the server is what
-  # updates it - the egg image runs SteamCMD on every container start - and the
-  # game locks out any client newer than the server, so this restarts it nightly.
-  # It owns that trigger alone: the panel's own scheduler can restart on a cron
-  # but cannot see players, and Pterodactyl exposes no player count anywhere, so
-  # the count is read from the server's own console line via Wings' /logs route.
-  # Same image, token mount and stdlib-only shape as valheim-joincode; kept as a
-  # separate container so each script does one thing and can be restarted alone.
   valheim-autoupdate:
     container_name: valheim-autoupdate
     image: python:3.13-alpine@sha256:7415fbc3c9e4979cc717d92377ab2bc7b2b4a2af1ac03cc52b5f3f88efedaf3a
@@ -806,29 +593,19 @@ services:
     depends_on:
       - wings
     environment:
-      # TZ is what RESTART_AT is read in - the image carries tzdata, so this is a
-      # real zone and follows DST. The game's own log timestamps are UTC and are
-      # parsed as such, independently of this.
       - TZ=America/Los_Angeles
       - VALHEIM_UUID=0fe911ae-87fb-40ea-a1f9-eec00498c5b8
       - RESTART_AT=03:00
-      # How long past RESTART_AT to keep re-checking when players are on. Ends at
-      # 06:00; a session running that long simply gets no update that night.
       - WINDOW_MINUTES=180
       - POLL_SECONDS=300
     volumes:
       - ./services/valheim-autoupdate/guard.py:/guard.py:ro
-      # Wings' node token, read from its own config - same single source of truth
-      # as valheim-joincode.
       - ./services/pterodactyl/wings-etc:/etc/pterodactyl:ro
-      # Which night was already handled, so a recreate mid-window does not fire a
-      # second restart. Also what the Glance monitor probes.
       - ./services/valheim-autoupdate/state:/srv
     command: ["python3", "-u", "/guard.py"]
     labels:
       - com.centurylinklabs.watchtower.enable=false
 
-  # ─── Docker Management ────────────────────────────────────────────────────
 
   portainer:
     container_name: portainer
@@ -844,12 +621,9 @@ services:
     ports:
       - "9000:9000"
 
-  # ─── Reverse Proxy ────────────────────────────────────────────────────────
 
   nginx-proxy-manager:
     container_name: nginx-proxy-manager
-    # Major-pinned: untagged floated to :latest. Holds all proxy hosts + certs;
-    # a surprise major could break routing. Stays in 2.x.
     image: jc21/nginx-proxy-manager:2
     restart: unless-stopped
     labels:
@@ -866,7 +640,6 @@ services:
       - "443:443"
       - "81:81"
 
-  # ─── Drive Health Monitoring ──────────────────────────────────────────────
 
   scrutiny:
     container_name: scrutiny
@@ -890,7 +663,6 @@ services:
     ports:
       - "8085:8080"
 
-  # ─── Auto Updater ─────────────────────────────────────────────────────────
 
   watchtower:
     container_name: watchtower
@@ -905,18 +677,10 @@ services:
     environment:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_SCHEDULE=0 0 4 * * *
-      # Opt-in updates. With a scope set, Watchtower touches ONLY containers
-      # carrying a matching com.centurylinklabs.watchtower.scope label — so the
-      # game-server containers Wings creates on the host socket (floating egg
-      # images, e.g. ghcr.io/parkervcp/games:valheim) are ignored by construction,
-      # now and for every server added later. Per-container enable=false labels
-      # could never cover containers that don't exist yet.
-      # A new service gets no auto-updates until it opts in with a scope label.
       - WATCHTOWER_SCOPE=homelab
       - TZ=America/Los_Angeles
-      - DOCKER_API_VERSION=1.55           # tracks host engine API (26.04 = 1.55); re-check after OS upgrade (see README → Upgrading the Ubuntu Release)
+      - DOCKER_API_VERSION=1.55
 
-  # ─── Uptime Monitoring ────────────────────────────────────────────────────
 
   uptime-kuma:
     container_name: uptime-kuma
@@ -931,7 +695,6 @@ services:
     ports:
       - "3002:3001"
 
-  # ─── Dashboard ────────────────────────────────────────────────────────────
 
   speedtest-tracker:
     container_name: speedtest-tracker
@@ -974,27 +737,12 @@ services:
       - SPEEDTEST_URL=${SPEEDTEST_URL}
       - SPEEDTEST_TRACKER_API_TOKEN=${SPEEDTEST_TRACKER_API_TOKEN}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
-      # Pterodactyl client (ptlc_) key — the Valheim tile's only data source.
-      # Valheim is UDP 2456/2457, so the monitor widget cannot probe it.
       - PTERO_CLIENT_API_KEY=${PTERO_CLIENT_API_KEY}
     volumes:
       - ./services/glance/config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /sys:/sys:ro
-      # Tank pool (ro), its own bind so server-stats can read it (the /host bind
-      # below is non-recursive, so it does NOT include /host/mnt/tank).
       - /mnt/tank:/mnt/tank:ro
-      # Host root (ro) so server-stats can report the host's disks (root SSD +
-      # tank) — in-container "/" is glance's own overlay (which lives on tank).
-      # Referenced as /host in glance.yml. Two non-obvious requirements:
-      #  1. bind.recursive: disabled — a normal (recursive) bind of / drags in
-      #     hundreds of host submounts (/host/snap/* squashfs, /host/dev, ...)
-      #     that pollute glance's mount enumeration and leave the root disk n/a.
-      #  2. host /proc is deliberately NOT bind-mounted — doing so makes glance
-      #     read the host mount table (no /host entry → root shows unavailable)
-      #     and spams /snap/* stat warnings. CPU/mem/load still report host-wide
-      #     without it (those /proc files aren't namespaced). Trade-off: the
-      #     widget's "uptime" reflects the glance container, not the host.
       - type: bind
         source: /
         target: /host
@@ -1016,18 +764,11 @@ services:
       - seerr
       - speedtest-tracker
 
-  # ─── Application Platform ─────────────────────────────────────────────────
-  # NOTE: this stack is intentionally STOPPED to free memory for the Pterodactyl
-  # game server (see README Part 20 + Part 24). The blocks and all data under
-  # services/coolify/ are kept so it can come back. `docker compose up -d` with
-  # no service name WILL restart these — bring the stack up by naming services,
-  # or `docker compose stop coolify coolify-realtime coolify-db coolify-redis`
-  # afterwards. coolify-sentinel is spawned by Coolify itself, not by compose,
-  # so it must be stopped with plain `docker stop coolify-sentinel`.
 
 
   coolify-db:
     container_name: coolify-db
+    profiles: [coolify]
     image: postgres:15-alpine
     restart: unless-stopped
     labels:
@@ -1049,6 +790,7 @@ services:
 
   coolify-redis:
     container_name: coolify-redis
+    profiles: [coolify]
     image: redis:7-alpine
     restart: unless-stopped
     labels:
@@ -1067,10 +809,11 @@ services:
 
   coolify-realtime:
     container_name: coolify-realtime
+    profiles: [coolify]
     image: ghcr.io/coollabsio/coolify-realtime:latest
     restart: unless-stopped
     labels:
-      - com.centurylinklabs.watchtower.enable=false   # update Coolify via its own UI, not Watchtower
+      - com.centurylinklabs.watchtower.enable=false
     networks:
       - homelab
     ports:
@@ -1083,8 +826,7 @@ services:
 
   coolify:
     container_name: coolify
-    # Build-hash tags upstream (no clean major); Coolify ships breaking migrations
-    # and self-updates via its own UI. Fenced from Watchtower rather than pinned.
+    profiles: [coolify]
     image: ghcr.io/coollabsio/coolify:latest
     restart: unless-stopped
     labels:
@@ -1102,34 +844,28 @@ services:
       - ./services/coolify/app:/data/coolify
       - ./services/coolify/ssh:/var/www/html/.ssh
     environment:
-      # App
       - APP_KEY=${COOLIFY_APP_KEY}
       - APP_ENV=production
       - APP_DEBUG=false
       - APP_URL=https://coolify.marlboro-bc.duckdns.org
-      # Database
       - DB_CONNECTION=pgsql
       - DB_HOST=coolify-db
       - DB_PORT=5432
       - DB_DATABASE=coolify
       - DB_USERNAME=coolify
       - DB_PASSWORD=${COOLIFY_DB_PASSWORD}
-      # Redis
       - REDIS_HOST=coolify-redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${COOLIFY_REDIS_PASSWORD}
-      # Queues/Sessions/Cache
       - QUEUE_CONNECTION=redis
       - SESSION_DRIVER=redis
       - CACHE_DRIVER=redis
-      # WebSocket (Soketi)
       - PUSHER_HOST=coolify-realtime
       - PUSHER_PORT=6001
       - PUSHER_SCHEME=http
       - PUSHER_APP_ID=${COOLIFY_PUSHER_APP_ID}
       - PUSHER_APP_KEY=${COOLIFY_PUSHER_APP_KEY}
       - PUSHER_APP_SECRET=${COOLIFY_PUSHER_APP_SECRET}
-      # Disable built-in Traefik proxy (NPM handles TLS)
       - DISABLE_STANDALONE_MODE=true
     ports:
       - "8000:8080"
@@ -1141,7 +877,6 @@ services:
       coolify-realtime:
         condition: service_started
 
-  # ─── Git Forge ────────────────────────────────────────────────────────────
 
   forgejo:
     container_name: forgejo
@@ -1155,27 +890,20 @@ services:
       - USER_UID=1000
       - USER_GID=1000
       - TZ=America/Los_Angeles
-      # Skip the web installer and start straight into the app. SQLite (the
-      # default DB_TYPE) lives at /data/gitea/gitea.db; SECRET_KEY/INTERNAL_TOKEN
-      # are auto-generated into app.ini on first run.
       - FORGEJO__security__INSTALL_LOCK=true
-      # Public URL (behind NPM) and the host shown in SSH clone URLs.
       - FORGEJO__server__DOMAIN=git.marlboro-bc.duckdns.org
       - FORGEJO__server__ROOT_URL=https://git.marlboro-bc.duckdns.org/
       - FORGEJO__server__SSH_DOMAIN=git.marlboro-bc.duckdns.org
-      - FORGEJO__server__SSH_PORT=2222          # matches the 2222:22 host mapping below
-      # Git LFS: large-file storage under /data/git/lfs (inside the data volume).
+      - FORGEJO__server__SSH_PORT=2222
       - FORGEJO__server__LFS_START_SERVER=true
-      # No open sign-ups; the admin is created via CLI (see README Part 22).
       - FORGEJO__service__DISABLE_REGISTRATION=true
     volumes:
       - ./services/forgejo/data:/data
       - /etc/localtime:/etc/localtime:ro
     ports:
-      - "3003:3000"   # web UI (internal container port is 3000)
-      - "2222:22"     # git over SSH (host 22 is the OS sshd)
+      - "3003:3000"
+      - "2222:22"
 
-  # ─── Dynamic DNS ──────────────────────────────────────────────────────────
 
   duckdns:
     container_name: duckdns

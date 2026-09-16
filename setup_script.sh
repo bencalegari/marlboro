@@ -1,26 +1,158 @@
 #!/usr/bin/env bash
-# setup_script.sh - Pre-compose host provisioning: credentials + .env, host-level
-# setup, and the Sunshine stream-host (sway session).
-# Idempotent: safe to re-run. Creates missing 1Password items, pulls values into
-# .env, seeds qBittorrent/Sonarr creds, media dirs, the docker wait-for-tank drop-in,
-# and provisions Sunshine (sway autologin + KMS capture — see configure_sunshine).
-# Requires: 1Password CLI (op), jq. The Sunshine section additionally uses curl +
-# interactive sudo (apt/gdm/usermod) and may require a reboot.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
 TAG="marlboro-nas"
-VAULT="Private"         # run `op vault list` to confirm your vault name
-REBOOT_NEEDED=0         # set by configure_sunshine (input group / gdm session); flagged in summary
+VAULT="Private"
+REBOOT_NEEDED=0
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 log() { echo -e "\033[1;32m==>\033[0m $1" >&2; }
 err() { echo -e "\033[1;31mERROR:\033[0m $1" >&2; exit 1; }
 
-# Create a Login item with a generated password if it doesn't exist
+install_apt_packages() {
+  local package missing=()
+  for package in "$@"; do
+    dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed' || missing+=("$package")
+  done
+  [ "${#missing[@]}" -eq 0 ] && return
+  log "Installing: ${missing[*]}"
+  sudo apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+}
+
+install_docker() {
+  command -v docker >/dev/null && docker compose version >/dev/null 2>&1 && return
+  if command -v docker >/dev/null; then
+    sudo apt-get update -qq
+    local compose_package
+    for compose_package in docker-compose-plugin docker-compose-v2; do
+      if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$compose_package" \
+          && docker compose version >/dev/null 2>&1; then
+        return
+      fi
+    done
+    err "Docker is installed without Compose. Install a compatible Compose plugin and rerun setup."
+  fi
+  local architecture codename key_candidate source_candidate
+  architecture=$(dpkg --print-architecture)
+  codename=$(. /etc/os-release && printf '%s' "$VERSION_CODENAME")
+  sudo install -d -m 0755 /etc/apt/keyrings
+  key_candidate=$(mktemp)
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o "$key_candidate"
+  sudo install -m 0644 "$key_candidate" /etc/apt/keyrings/docker.asc
+  rm -f "$key_candidate"
+  source_candidate=$(mktemp)
+  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
+    "$architecture" "$codename" > "$source_candidate"
+  sudo install -m 0644 "$source_candidate" /etc/apt/sources.list.d/docker.list
+  rm -f "$source_candidate"
+  sudo apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+install_onepassword_cli() {
+  command -v op >/dev/null && return
+  local architecture key_candidate source_candidate
+  architecture=$(dpkg --print-architecture)
+  key_candidate=$(mktemp)
+  curl -fsSL https://downloads.1password.com/linux/keys/1password.asc \
+    | gpg --dearmor > "$key_candidate"
+  sudo install -m 0644 "$key_candidate" /usr/share/keyrings/1password-archive-keyring.gpg
+  rm -f "$key_candidate"
+  source_candidate=$(mktemp)
+  printf 'deb [arch=%s signed-by=/usr/share/keyrings/1password-archive-keyring.gpg] https://downloads.1password.com/linux/debian/%s stable main\n' \
+    "$architecture" "$architecture" > "$source_candidate"
+  sudo install -m 0644 "$source_candidate" /etc/apt/sources.list.d/1password.list
+  rm -f "$source_candidate"
+  sudo apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y 1password-cli
+}
+
+ensure_docker_access() {
+  sudo systemctl enable --now docker >/dev/null
+  docker info >/dev/null 2>&1 && return
+  sudo docker info >/dev/null 2>&1 || err "Docker daemon is unavailable."
+  local user_name reexec_command
+  user_name=$(id -un)
+  sudo usermod -aG docker "$user_name"
+  printf -v reexec_command '%q' "$SCRIPT_DIR/setup_script.sh"
+  log "Restarting setup with Docker group access"
+  exec sg docker -c "exec $reexec_command"
+}
+
+bootstrap_host_tools() {
+  command -v apt-get >/dev/null || err "This setup requires an apt-based Ubuntu host."
+  sudo -v
+  install_apt_packages ca-certificates curl gnupg jq openssl python3 python3-yaml
+  install_docker
+  install_onepassword_cli
+  ensure_docker_access
+}
+
+configure_docker_daemon() {
+  mountpoint -q /mnt/tank || err "/mnt/tank is not mounted. Mount storage and rerun setup."
+  local active_root container_count changed
+  active_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+  container_count=$(docker ps -aq | wc -l | tr -d ' ')
+  if [ -n "$active_root" ] && [ "$active_root" != "/mnt/tank/docker" ] && [ "$container_count" -gt 0 ]; then
+    err "Docker uses $active_root with existing containers. Migrate it to /mnt/tank/docker before rerunning setup."
+  fi
+  sudo install -d -m 0711 /mnt/tank/docker
+  changed=$(sudo python3 - <<'PY'
+import json
+import os
+
+path = "/etc/docker/daemon.json"
+try:
+    with open(path) as handle:
+        config = json.load(handle)
+except FileNotFoundError:
+    config = {}
+
+desired = {"data-root": "/mnt/tank/docker", "dns": ["1.1.1.1", "8.8.8.8"]}
+if all(config.get(key) == value for key, value in desired.items()):
+    print("unchanged")
+else:
+    config.update(desired)
+    temporary = path + ".tmp"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(temporary, "w") as handle:
+        json.dump(config, handle, indent=2)
+        handle.write("\n")
+    os.replace(temporary, path)
+    print("changed")
+PY
+)
+  if [ "$changed" = "changed" ]; then
+    log "Restarting Docker with managed storage and DNS"
+    sudo systemctl restart docker
+  fi
+}
+
+configure_system_dns() {
+  local destination candidate resolver changed=0
+  destination=/etc/systemd/resolved.conf.d/adguard.conf
+  candidate=$(mktemp)
+  printf '[Resolve]\nDNS=1.1.1.1 8.8.8.8\nDNSStubListener=no\n' > "$candidate"
+  if ! sudo cmp -s "$candidate" "$destination"; then
+    sudo install -D -m 0644 "$candidate" "$destination"
+    changed=1
+  fi
+  rm -f "$candidate"
+  resolver=/run/systemd/resolve/resolv.conf
+  if [ "$(readlink -f /etc/resolv.conf 2>/dev/null || true)" != "$resolver" ]; then
+    sudo ln -sfn "$resolver" /etc/resolv.conf
+    changed=1
+  fi
+  if [ "$changed" -eq 1 ]; then
+    sudo systemctl restart systemd-resolved
+  fi
+}
+
 ensure_password() {
   local title="$1"
   local username="$2"
@@ -39,7 +171,6 @@ ensure_password() {
   fi
 }
 
-# Create a Login item with a specific secret (e.g. hex key) if it doesn't exist
 ensure_secret() {
   local title="$1"
   local username="$2"
@@ -59,33 +190,72 @@ ensure_secret() {
   fi
 }
 
-# Pull a field from 1Password; returns empty string if item/field missing
 pull_field() {
   local title="$1"
   local field="$2"
   op item get "$title" --vault "$VAULT" --fields "$field" --reveal 2>/dev/null || true
 }
 
-# ─── Preflight ────────────────────────────────────────────────────────────────
+prompt_external_item() {
+  local title="$1"
+  shift
+  op item get "$title" --vault "$VAULT" >/dev/null 2>&1 && return
+  if [ ! -t 0 ]; then
+    log "WARNING: '$title' is missing; rerun interactively to configure it"
+    return
+  fi
+  local answer field prompt value assignments=()
+  read -r -p "Configure '$title' now? [y/N] " answer
+  [[ "$answer" =~ ^[Yy]$ ]] || { log "Skipping '$title'"; return; }
+  for field in "$@"; do
+    prompt=$field
+    [ "$title:$field" = "Marlboro NAS - SMS Allowlist:allowlist" ] \
+      && prompt="allowlist (+15551234567=seerr-display-name,...)"
+    read -r -s -p "$prompt: " value
+    echo ""
+    [ -n "$value" ] || { log "WARNING: $field was blank; skipping '$title'"; return; }
+    assignments+=("$field[text]=$value")
+  done
+  op item create --category "Secure Note" --title "$title" --vault "$VAULT" \
+    --tags "$TAG" "${assignments[@]}" >/dev/null
+  log "Created '$title'"
+}
 
-command -v op &>/dev/null || err "1Password CLI (op) not found."
-command -v jq &>/dev/null || err "jq not found. Run: sudo apt install jq"
-op whoami &>/dev/null || err "Not signed in to 1Password. Run: eval \$(op signin)"
+prompt_plex_claim() {
+  PLEX_CLAIM_VALUE=""
+  grep -qE 'PlexOnlineToken="[^"]+"' "$SCRIPT_DIR/services/plex/config/Preferences.xml" 2>/dev/null && return
+  [ -t 0 ] || return
+  read -r -s -p "Plex claim token from https://plex.tv/claim (Enter to skip): " PLEX_CLAIM_VALUE
+  echo ""
+}
+
+
+bootstrap_host_tools
+configure_docker_daemon
+configure_system_dns
+if ! op whoami &>/dev/null; then
+  log "Sign in to 1Password to continue"
+  eval "$(op signin)"
+fi
+op whoami &>/dev/null || err "1Password sign-in failed."
 
 log "Signed in as: $(op whoami --format=json | jq -r '.email')"
 log "Ensuring credentials exist in 1Password (vault: $VAULT, tag: $TAG)..."
 
-# ─── Create Missing Items ─────────────────────────────────────────────────────
 
 ensure_password "Marlboro NAS - Immich DB"            "immich"
 ensure_password "Marlboro NAS - qBittorrent"          "admin"
+ensure_password "Marlboro NAS - AdGuard"               "admin"
+ensure_password "Marlboro NAS - Jellyfin"              "ben"
 ensure_password "Marlboro NAS - Nginx Proxy Manager"  "admin@example.com"
 ensure_password "Marlboro NAS - Portainer"            "admin"
+ensure_password "Marlboro NAS - Sonarr"                "admin"
+ensure_password "Marlboro NAS - Radarr"                "admin"
+ensure_password "Marlboro NAS - Sunshine"              "admin"
 ensure_password "Marlboro NAS - RomM DB"              "romm-user"
 ensure_password "Marlboro NAS - RomM DB Root"         "root"
 ensure_secret   "Marlboro NAS - RomM Auth Secret"     "romm" "$(openssl rand -hex 32)"
 
-# Coolify — APP_KEY must be "base64:" + base64(32 bytes) (Laravel format)
 ensure_secret   "Marlboro NAS - Coolify App Key"          "coolify" "base64:$(openssl rand -base64 32)"
 ensure_password "Marlboro NAS - Coolify DB"               "coolify"
 ensure_secret   "Marlboro NAS - Coolify Redis"            "coolify" "$(openssl rand -hex 32)"
@@ -93,99 +263,39 @@ ensure_secret   "Marlboro NAS - Coolify Pusher App ID"    "coolify" "$(openssl r
 ensure_secret   "Marlboro NAS - Coolify Pusher App Key"   "coolify" "$(openssl rand -hex 16)"
 ensure_secret   "Marlboro NAS - Coolify Pusher Secret"    "coolify" "$(openssl rand -hex 32)"
 
-# Speedtest Tracker — APP_KEY must be "base64:" + base64(32 bytes) (Laravel format)
 ensure_secret   "Marlboro NAS - Speedtest App Key"        "speedtest" "base64:$(openssl rand -base64 32)"
 
-# Forgejo — admin account, created via CLI after first start (see README Part 22).
-# Not consumed by the container (Forgejo generates its own SECRET_KEY on first
-# run); lives in 1Password so the admin-create command can pull it.
 ensure_password "Marlboro NAS - Forgejo"                  "ben"
 
-# Samba/SMB — password synced into smbpasswd by configure_samba (host file share).
 ensure_password "Marlboro NAS - Samba"                    "bcalegari"
 
-# SMS bridge — shared secret Seerr presents on its webhook to sms-bridge. Generated
-# here; setup_services.sh writes the matching Authorization header into Seerr.
 ensure_secret   "Marlboro NAS - SMS Bridge"               "sms-bridge" "$(openssl rand -hex 32)"
 
-# Pterodactyl — game server panel (see README Part 24).
-# APP_KEY must be "base64:" + base64(32 bytes) (Laravel format). CRITICAL: this key
-# decrypts every Wings node's daemon token, so rotating it silently breaks every node
-# until its config.yml is regenerated. Treat it as permanent, not rotatable.
 ensure_secret   "Marlboro NAS - Pterodactyl App Key"      "pterodactyl" "base64:$(openssl rand -base64 32)"
-# Hashids salt obfuscates the short server IDs in panel URLs. The image self-generates
-# one if unset, but then it lives only in the container — pin it here.
 ensure_secret   "Marlboro NAS - Pterodactyl Hashids"      "pterodactyl" "$(openssl rand -hex 10)"
 ensure_password "Marlboro NAS - Pterodactyl DB"           "pterodactyl"
 ensure_password "Marlboro NAS - Pterodactyl DB Root"      "root"
-# Panel admin — created by artisan p:user:make in setup_services.sh, NOT consumed by
-# the container, so it stays out of .env. p:user:make requires 8+ chars, mixed case
-# and at least one digit; the generator's "letters,digits,32" satisfies that.
 ensure_password "Marlboro NAS - Pterodactyl Admin"        "ben"
 
-# DuckDNS token must be created manually — just warn if missing
-if ! op item get "Marlboro NAS - DuckDNS" --vault "$VAULT" &>/dev/null; then
-  log "WARNING: 'Marlboro NAS - DuckDNS' not found in 1Password — DUCKDNS_TOKEN will be blank"
-fi
+prompt_external_item "Marlboro NAS - DuckDNS" token
+prompt_external_item "Marlboro NAS - IGDB" client_id secret
+prompt_external_item "Marlboro NAS - Screenscraper" username password
+prompt_external_item "Marlboro NAS - Tailscale" api_key
+prompt_external_item "Marlboro NAS - Speedtest Tracker" api_token
+prompt_external_item "Marlboro NAS - Twilio" account_sid auth_token from_number
+prompt_external_item "Marlboro NAS - SMS Allowlist" allowlist
+prompt_external_item "github.com" token
+prompt_plex_claim
 
-# IGDB credentials must be created manually — just warn if missing
-if ! op item get "Marlboro NAS - IGDB" --vault "$VAULT" &>/dev/null; then
-  log "WARNING: 'Marlboro NAS - IGDB' not found in 1Password — IGDB vars will be blank"
-fi
 
-# ScreenScraper credentials must be created manually — just warn if missing
-if ! op item get "Marlboro NAS - Screenscraper" --vault "$VAULT" &>/dev/null; then
-  log "WARNING: 'Marlboro NAS - Screenscraper' not found in 1Password — SCREENSCRAPER vars will be blank"
-fi
-
-# Glance widget API keys are created manually after first-run — warn if missing.
-# Note: the Sonarr/Radarr keys are also consumed by Unpackerr (archive
-# extraction), so a blank key here disables auto-extraction too, not just the
-# Glance widgets.
-for item in "Marlboro NAS - Sonarr" "Marlboro NAS - Radarr" "Marlboro NAS - Tailscale" \
-           "Marlboro NAS - Speedtest Tracker" "Marlboro NAS - Pterodactyl Client API"; do
-  if ! op item get "$item" --vault "$VAULT" &>/dev/null; then
-    log "WARNING: '$item' not found in 1Password — Glance widget will be blank until you add it"
-  fi
-done
-
-# Twilio credentials + the SMS allowlist must be created manually (they come from the
-# Twilio console and from asking people for their phone number) — just warn if missing.
-# The allowlist lives in 1Password rather than the repo on purpose: it is household
-# phone numbers, i.e. PII that has no business in git history.
-#   Marlboro NAS - Twilio       fields: account_sid, auth_token, from_number
-#   Marlboro NAS - SMS Allowlist field:  allowlist
-#     value format: +15035550142=bcalegari,+15035550143=mom
-#     (E.164 phone = Seerr display name — see README "SMS Requests")
-for item in "Marlboro NAS - Twilio" "Marlboro NAS - SMS Allowlist"; do
-  if ! op item get "$item" --vault "$VAULT" &>/dev/null; then
-    log "WARNING: '$item' not found in 1Password — SMS bridge will accept nothing until you add it"
-  fi
-done
-
-# Glance releases widget needs a read-only GitHub PAT — warn if the 1Password item is missing.
-if ! op item get "github.com" --vault "$VAULT" &>/dev/null; then
-  log "WARNING: 'github.com' not found in 1Password — GITHUB_TOKEN will be blank; Glance releases widget will hit GitHub's 60/hr rate limit"
-fi
-
-# ─── Pull Credentials & Write .env ────────────────────────────────────────────
-
-log "Pulling credentials from 1Password and writing $ENV_FILE..."
-
-cat > "$ENV_FILE" <<EOF
-# Generated by setup_script.sh — do not commit this file to git
-# Credentials are stored in 1Password under tag: $TAG
+write_env_file() {
+  local candidate
+  log "Pulling credentials from 1Password"
+  candidate=$(mktemp "$SCRIPT_DIR/.env.XXXXXX")
+  cat > "$candidate" <<EOF
 
 IMMICH_DB_PASSWORD=$(pull_field "Marlboro NAS - Immich DB" password)
-# Consumed by both qBittorrent (seeded into qBittorrent.conf below) and Flood
-# (FLOOD_OPTION_qbpass), which connects to qBittorrent's Web API with auth=none.
 QBIT_PASSWORD=$(pull_field "Marlboro NAS - qBittorrent" password)
-# Plex one-time claim token — intentionally BLANK; not a stored secret (expires
-# 4 min after issue at https://plex.tv/claim). To link the Plex server to the
-# account on first start, pass it inline instead of editing this file:
-#   PLEX_CLAIM=claim-xxxx docker compose up -d plex
-# After the server is claimed once, blank is correct — the permanent server token
-# lives in services/plex/config. Declared so compose doesn't warn on \${PLEX_CLAIM}.
 PLEX_CLAIM=
 ROMM_ROOT_PASSWORD=$(pull_field "Marlboro NAS - RomM DB Root" password)
 ROMM_DB_PASSWORD=$(pull_field "Marlboro NAS - RomM DB" password)
@@ -201,8 +311,6 @@ COOLIFY_REDIS_PASSWORD=$(pull_field "Marlboro NAS - Coolify Redis" password)
 COOLIFY_PUSHER_APP_ID=$(pull_field "Marlboro NAS - Coolify Pusher App ID" password)
 COOLIFY_PUSHER_APP_KEY=$(pull_field "Marlboro NAS - Coolify Pusher App Key" password)
 COOLIFY_PUSHER_APP_SECRET=$(pull_field "Marlboro NAS - Coolify Pusher Secret" password)
-# Consumed by both Glance (dashboard widgets) and Unpackerr (queue polling +
-# archive extraction). Blank here means neither works.
 SONARR_API_KEY=$(pull_field "Marlboro NAS - Sonarr" api_key)
 RADARR_API_KEY=$(pull_field "Marlboro NAS - Radarr" api_key)
 TAILSCALE_API_KEY=$(pull_field "Marlboro NAS - Tailscale" api_key)
@@ -213,49 +321,33 @@ NGINX_PASSWORD=$(pull_field "Marlboro NAS - Nginx Proxy Manager" password)
 SPEEDTEST_URL=http://192.168.0.10:8765
 SPEEDTEST_APP_KEY=$(pull_field "Marlboro NAS - Speedtest App Key" password)
 SPEEDTEST_TRACKER_API_TOKEN=$(pull_field "Marlboro NAS - Speedtest Tracker" api_token)
-# Consumed by the Glance "releases" widget. All tracked repos are public, so a
-# read-only PAT lifts GitHub's anonymous 60/hr rate limit to 5000/hr.
 GITHUB_TOKEN=$(pull_field "github.com" token)
-# ── SMS bridge (see README "SMS Requests") ──
 TWILIO_ACCOUNT_SID=$(pull_field "Marlboro NAS - Twilio" account_sid)
 TWILIO_AUTH_TOKEN=$(pull_field "Marlboro NAS - Twilio" auth_token)
 TWILIO_FROM_NUMBER=$(pull_field "Marlboro NAS - Twilio" from_number)
 SMS_ALLOWLIST=$(pull_field "Marlboro NAS - SMS Allowlist" allowlist)
 SMS_BRIDGE_HOOK_SECRET=$(pull_field "Marlboro NAS - SMS Bridge" password)
-# Twilio signs the PUBLIC url it POSTs to. sms-bridge sits behind NPM and only ever
-# sees the internal one, so signature verification uses this value verbatim — it must
-# match the Messaging webhook configured on the Twilio number, character for character.
 SMS_BRIDGE_PUBLIC_URL=https://sms.marlboro-bc.duckdns.org/twilio/inbound
-# Hard ceiling on outbound texts per rolling 24h. Bounds worst-case Twilio spend.
 SMS_DAILY_CAP=100
-# ── Pterodactyl (see README Part 24) ──
-# PTERO_APP_KEY is load-bearing beyond the panel itself: it decrypts each Wings
-# node's daemon token. If it changes, every node goes offline until reconfigured.
 PTERO_APP_KEY=$(pull_field "Marlboro NAS - Pterodactyl App Key" password)
 PTERO_HASHIDS_SALT=$(pull_field "Marlboro NAS - Pterodactyl Hashids" password)
 PTERO_DB_PASSWORD=$(pull_field "Marlboro NAS - Pterodactyl DB" password)
 PTERO_DB_ROOT_PASSWORD=$(pull_field "Marlboro NAS - Pterodactyl DB Root" password)
-# Client (ptlc_) key, minted in the panel UI — Account → API Credentials (README 24.14).
-# User-scoped: it only sees servers this user owns. Consumed solely by the Glance
-# Valheim tile. NOT the Application (ptla_) key — that API has no resources endpoint,
-# so it cannot report whether a server is running.
 PTERO_CLIENT_API_KEY=$(pull_field "Marlboro NAS - Pterodactyl Client API" api_token)
 EOF
 
-chmod 600 "$ENV_FILE"
+  chmod 600 "$candidate"
+  if [ -f "$ENV_FILE" ] && cmp -s "$candidate" "$ENV_FILE"; then
+    rm -f "$candidate"
+    log ".env already matches 1Password"
+  else
+    mv "$candidate" "$ENV_FILE"
+    log ".env updated with $(grep -c '=' "$ENV_FILE") variables"
+  fi
+}
 
-log ".env written with $(grep -c '=' "$ENV_FILE") variables"
+write_env_file
 
-# ─── Seed qBittorrent WebUI Credentials + HostHeaderValidation ───────────────
-# qBittorrent stores its WebUI password as a PBKDF2-HMAC-SHA512 hash inside
-# qBittorrent.conf and accepts no plaintext-password env var. We compute the
-# hash from the 1Password value and write it directly, so the container never
-# needs the temporary-password dance. Flood logs in with this same plaintext
-# value (via FLOOD_OPTION_qbpass in .env), so the two are kept in sync here.
-# We also force WebUI\HostHeaderValidation=false in the same pass — it must be
-# set before first start or the API/WebUI rejects requests and the post-setup
-# reconcile (setup_services.sh) can't reach qBittorrent. Runtime settings (save
-# paths, share limits) are handled post-compose by setup_services.sh.
 
 QBIT_CONF="$SCRIPT_DIR/services/qbittorrent/config/qBittorrent/qBittorrent.conf"
 QBIT_PW=$(pull_field "Marlboro NAS - qBittorrent" password)
@@ -288,8 +380,6 @@ except FileNotFoundError:
 
 pw_idx = next((i for i, l in enumerate(lines) if l.startswith('WebUI\\Password_PBKDF2=')), None)
 user_idx = next((i for i, l in enumerate(lines) if l.startswith('WebUI\\Username=')), None)
-# HostHeaderValidation must be false or the WebUI/API rejects requests whose
-# Host header isn't whitelisted — which blocks setup_services.sh on a fresh box.
 hhv_idx = next((i for i, l in enumerate(lines) if l.startswith('WebUI\\HostHeaderValidation=')), None)
 prefs_idx = next((i for i, l in enumerate(lines) if l.strip() == '[Preferences]'), None)
 
@@ -355,11 +445,6 @@ else
   fi
 fi
 
-# ─── Reconcile Sonarr WebUI Credentials ──────────────────────────────────────
-# Sonarr v4 stores login creds in sonarr.db (SQLite) — no env var or config
-# file path. We use the API (X-Api-Key auth, independent of forms login) to
-# PUT new creds from 1Password if they've drifted. Probes a forms login first
-# so we don't trigger a Sonarr restart on every setup run.
 
 SONARR_API_KEY=$(pull_field "Marlboro NAS - Sonarr" api_key)
 SONARR_USER=$(pull_field "Marlboro NAS - Sonarr" username)
@@ -367,12 +452,9 @@ SONARR_PASS=$(pull_field "Marlboro NAS - Sonarr" password)
 SONARR_BASE="http://localhost:8989"
 
 reconcile_sonarr_login() {
-  # 1. API reachable?
   curl -fsS -m 5 -H "X-Api-Key: $SONARR_API_KEY" \
     "$SONARR_BASE/api/v3/system/status" >/dev/null 2>&1 || return 2
 
-  # 2. Do current 1Password creds already work via forms login?
-  #    Success → 302 to /, failure → 302 to /login?...loginFailed=true
   local redirect
   redirect=$(curl -s -o /dev/null -m 5 -w '%{redirect_url}' \
     -X POST "$SONARR_BASE/login" \
@@ -383,7 +465,6 @@ reconcile_sonarr_login() {
     return 0
   fi
 
-  # 3. Drifted — PUT new creds. Must include passwordConfirmation.
   curl -fsS -H "X-Api-Key: $SONARR_API_KEY" "$SONARR_BASE/api/v3/config/host" \
     | jq --arg u "$SONARR_USER" --arg p "$SONARR_PASS" \
         '.username=$u | .password=$p | .passwordConfirmation=$p' \
@@ -408,7 +489,6 @@ else
   esac
 fi
 
-# ─── Ensure Media Directories & Ownership ────────────────────────────────────
 
 MEDIA_DIRS=(/mnt/tank/media/movies /mnt/tank/media/tv /mnt/tank/downloads/complete /mnt/tank/downloads/incomplete)
 
@@ -436,16 +516,6 @@ else
   log "WARNING: /mnt/tank not mounted — skipping media directory setup"
 fi
 
-# ─── Ensure Pterodactyl Directories ──────────────────────────────────────────
-# Wings hands bind-mount SOURCE paths to the host Docker daemon when it creates a
-# game container, while also reading those same files through its own filesystem.
-# Both views must agree, so every data path is mounted host==container (identity
-# mapped) in docker-compose.yml. Wings' own defaults (/var/lib/pterodactyl,
-# /var/log/pterodactyl) would need root to create and would sit on the 30 GB root
-# disk, so config.yml relocates root_directory + log_directory under /mnt/tank
-# (patched in by setup_services.sh) and these are the matching dirs.
-# /tmp/pterodactyl is Wings' tmp_directory — also identity mapped, since install
-# containers bind-mount it, but it stays on /tmp by design (short-lived).
 
 PTERO_DIRS=(/mnt/tank/pterodactyl/volumes /mnt/tank/pterodactyl/archives
             /mnt/tank/pterodactyl/backups /mnt/tank/pterodactyl/logs /tmp/pterodactyl)
@@ -458,21 +528,12 @@ for dir in db panel-var panel-logs wings-etc; do
   [ -d "$SCRIPT_DIR/services/pterodactyl/$dir" ] || mkdir -p "$SCRIPT_DIR/services/pterodactyl/$dir"
 done
 
-# ─── Ensure Docker Waits for /mnt/tank ───────────────────────────────────────
-# Docker's data-root is /mnt/tank/docker and every service bind-mounts paths
-# under /mnt/tank. If docker.service starts before the mount, it silently binds
-# onto empty dirs on the root fs: imports break with phantom "not enough free
-# space" errors, and downloads/media land on the root SSD where they're hidden
-# (and keep consuming space) once the tank mounts over them. A RequiresMountsFor
-# drop-in prevents the race — but only after a daemon-reload, so we verify the
-# dependency is actually *loaded*, not merely present on disk.
 
 DOCKER_DROPIN=/etc/systemd/system/docker.service.d/wait-for-tank.conf
 DOCKER_DROPIN_CONTENT='[Unit]
 RequiresMountsFor=/mnt/tank
 '
 
-# True only when docker.service has actually loaded the mount dependency.
 dropin_effective() {
   systemctl show docker -p RequiresMountsFor 2>/dev/null | grep -q '/mnt/tank'
 }
@@ -494,8 +555,6 @@ else
     printf '%s' "$DOCKER_DROPIN_CONTENT" | sudo tee "$DOCKER_DROPIN" >/dev/null
     sudo chmod 644 "$DOCKER_DROPIN"
   fi
-  # File is correct on disk — ensure systemd has actually loaded it (a live-placed
-  # drop-in stays inert until daemon-reload, even across weeks of uptime).
   if dropin_effective; then
     log "Docker wait-for-tank drop-in active"
   else
@@ -505,7 +564,6 @@ else
   fi
 fi
 
-# ─── Store Network Details ─────────────────────────────────────────────────────
 
 if command -v tailscale &>/dev/null; then
   if ! op item get "Marlboro NAS - Network" --vault "$VAULT" &>/dev/null; then
@@ -523,11 +581,6 @@ if command -v tailscale &>/dev/null; then
   fi
 fi
 
-# ─── Provision the Sunshine stream host (sway session + KMS capture) ─────────
-# Host-level, not a container — belongs to this pre-compose phase (no .env/container
-# dependency). Runs as the normal user; uses interactive sudo for apt/gdm/usermod.
-# Sets REBOOT_NEEDED (flagged in the summary). Why sway/KMS: see README Part 7.
-# Idempotent: guards skip anything already in place; never clobbers a working install.
 configure_sunshine() {
   local USER_NAME CONF_DIR SWAY_DIR UNIT_DIR AS_FILE GDM_CONF
   local SUNSHINE_VERSION DEB DEB_URL IDLE_TIMEOUT ICON RA_SVG ORIGINS bak tmp
@@ -538,18 +591,16 @@ configure_sunshine() {
   UNIT_DIR="$HOME/.config/systemd/user"
   AS_FILE="/var/lib/AccountsService/users/$USER_NAME"
   GDM_CONF="/etc/gdm3/custom.conf"
-  SUNSHINE_VERSION="v2026.516.143833"   # pin like the rest of the stack
+  SUNSHINE_VERSION="v2026.516.143833"
   DEB="sunshine-ubuntu-26.04-amd64.deb"
   DEB_URL="https://github.com/LizardByte/Sunshine/releases/download/${SUNSHINE_VERSION}/${DEB}"
-  IDLE_TIMEOUT=300                       # seconds idle before the shared monitor sleeps
+  IDLE_TIMEOUT=300
 
   log "Sunshine: provisioning stream host (sway + KMS)"
   if [ "$(id -u)" -eq 0 ]; then log "  running as root — skipping Sunshine (needs normal user for \$HOME + systemctl --user)"; return; fi
   command -v curl >/dev/null || { log "  curl not found — skipping Sunshine"; return; }
   mkdir -p "$CONF_DIR" "$SWAY_DIR" "$UNIT_DIR"
 
-  # 1. Tear down old/broken attempts (headless-weston, AppImage, Flatpak). Do NOT
-  #    touch 'sunshine.service' — on questing it's an alias of the packaged unit.
   systemctl --user disable --now weston.service 2>/dev/null || true
   if [ -f "$UNIT_DIR/sunshine.service" ] && grep -q 'sunshine.AppImage' "$UNIT_DIR/sunshine.service"; then rm -f "$UNIT_DIR/sunshine.service"; fi
   rm -f "$UNIT_DIR/weston.service"
@@ -557,7 +608,6 @@ configure_sunshine() {
     log "  removing Flatpak Sunshine (can't KMS-capture)…"; sudo flatpak uninstall -y --system dev.lizardbyte.app.Sunshine
   fi
 
-  # 2. Packages: sway session + swayidle + retroarch + icon converter.
   PKGS=()
   command -v sway         >/dev/null || PKGS+=(sway)
   command -v swayidle     >/dev/null || PKGS+=(swayidle)
@@ -565,7 +615,6 @@ configure_sunshine() {
   command -v rsvg-convert >/dev/null || PKGS+=(librsvg2-bin)
   if [ "${#PKGS[@]}" -gt 0 ]; then log "  installing: ${PKGS[*]}…"; sudo apt-get update -qq; sudo apt-get install -y "${PKGS[@]}"; fi
 
-  # 3. Sunshine .deb (postinst setcaps the binary for KMS).
   if ! dpkg-query -W sunshine >/dev/null 2>&1; then
     log "  installing $DEB ($SUNSHINE_VERSION)…"
     tmp="$(mktemp -d)"
@@ -576,10 +625,8 @@ configure_sunshine() {
   fi
   getcap /usr/bin/sunshine 2>/dev/null | grep -q cap_sys_admin || log "  WARNING: /usr/bin/sunshine missing cap_sys_admin — KMS capture will fail (reinstall the .deb)"
 
-  # 4. 'input' group for uinput (virtual gamepad/keyboard/mouse).
   if ! id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx input; then log "  adding $USER_NAME to 'input' group…"; sudo usermod -aG input "$USER_NAME"; REBOOT_NEEDED=1; fi
 
-  # 5. GDM autologin into the sway session (GDM reads Session= from AccountsService).
   if [ -f "$GDM_CONF" ] && ! grep -qE '^\s*AutomaticLoginEnable\s*=\s*[Tt]rue' "$GDM_CONF"; then
     log "  enabling GDM autologin for $USER_NAME…"
     sudo sed -i -E "/^\[daemon\]/a AutomaticLoginEnable=True\nAutomaticLogin=$USER_NAME" "$GDM_CONF"; REBOOT_NEEDED=1
@@ -589,7 +636,7 @@ configure_sunshine() {
     sudo python3 - "$AS_FILE" <<'PY'
 import configparser, os, sys
 p = sys.argv[1]
-c = configparser.ConfigParser(); c.optionxform = str  # preserve key case, don't clobber existing keys
+c = configparser.ConfigParser(); c.optionxform = str
 if os.path.exists(p): c.read(p)
 if not c.has_section("User"): c.add_section("User")
 c["User"]["Session"] = "sway"
@@ -603,19 +650,14 @@ PY
     REBOOT_NEEDED=1
   fi
 
-  # 6. sway session config + sway-session.target. graphical-session.target has
-  #    RefuseManualStart=yes, so it's pulled in via this target's BindsTo (which
-  #    is what actually launches Sunshine on the sway session).
   log "  writing sway config + sway-session.target…"
   cat > "$SWAY_DIR/config" <<'EOF'
-# stream-host session (autologin target for Sunshine/Moonlight)
 include /etc/sway/config
 
 exec systemctl --user import-environment WAYLAND_DISPLAY DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP && \
      dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP=sway && \
      systemctl --user start sway-session.target
 
-# Lit at boot; swayidle blanks it after inactivity (see swayidle.service).
 output * power on
 EOF
   cat > "$UNIT_DIR/sway-session.target" <<'EOF'
@@ -627,15 +669,9 @@ Wants=graphical-session-pre.target
 After=graphical-session-pre.target
 EOF
 
-  # 7. Shared-monitor power control: display.sh drives DPMS via swaymsg; swayidle
-  #    blanks on idle; Sunshine's global_prep_cmd forces the display on + pauses the
-  #    blanker for the duration of a stream (so KMS capture always has a lit connector).
   log "  writing display.sh + swayidle.service (idle ${IDLE_TIMEOUT}s)…"
   cat > "$CONF_DIR/display.sh" <<'EOF'
 #!/bin/bash
-# Shared-monitor power control for the Sunshine stream host.
-#   blank / wake              - idle blanker off/on (driven by swayidle)
-#   stream-start / stream-end - Sunshine prep: force on + pause blanker / re-arm blanker
 export SWAYSOCK="${SWAYSOCK:-$(ls -t /run/user/$(id -u)/sway-ipc.*.sock 2>/dev/null | head -1)}"
 case "$1" in
   wake)         swaymsg 'output * power on' ;;
@@ -661,7 +697,6 @@ Restart=on-failure
 WantedBy=graphical-session.target
 EOF
 
-  # 8. RetroArch tile icon (rendered from the shipped SVG; generic fallback).
   ICON="$CONF_DIR/retroarch.png"
   RA_SVG="/usr/share/icons/hicolor/scalable/apps/com.libretro.RetroArch.svg"
   if [ ! -f "$ICON" ]; then
@@ -669,13 +704,6 @@ EOF
     elif [ -f /usr/share/sunshine/box.png ]; then cp /usr/share/sunshine/box.png "$ICON"; fi
   fi
 
-  # 9. sunshine.conf: KMS + VAAPI + auto-detected CSRF origins + wake-on-stream.
-  #    csrf_allowed_origins must list every IP the web UI is reached by (browser
-  #    Origin includes :47990). Rewrite only if absent/stale (never clobber a working conf).
-  #    origin_web_ui_allowed = wan (not lan): pairing/admin happens from the phone
-  #    over Tailscale (100.64/10), which Sunshine classifies as WAN — 'lan' rejects
-  #    the PIN POST ("Web UI: [100.x] -- not authorized"). Still password-gated and
-  #    :47990 is only reachable via LAN + tailnet (never internet-forwarded).
   ORIGINS="$(ip -4 -o addr show scope global 2>/dev/null \
              | awk '$2 !~ /^(docker|br-|veth|virbr|lo)/ {print $4}' | cut -d/ -f1 \
              | sed 's#^#https://#; s#$#:47990#' | paste -sd, -)"
@@ -695,11 +723,9 @@ origin_web_ui_allowed = wan
 csrf_allowed_origins = $ORIGINS
 global_prep_cmd = [{"do":"$CONF_DIR/display.sh stream-start","undo":"$CONF_DIR/display.sh stream-end","elevated":"false"}]
 EOF
-    sed -i '/^csrf_allowed_origins = *$/d' "$CONF_DIR/sunshine.conf"   # drop if no IPs detected
+    sed -i '/^csrf_allowed_origins = *$/d' "$CONF_DIR/sunshine.conf"
   fi
 
-  # 10. apps.json — seed only if absent (web UI manages it after first run).
-  #     RetroArch uses cmd + auto-detach:false so it QUITS when the stream ends.
   if [ ! -f "$CONF_DIR/apps.json" ]; then
     log "  seeding apps.json (Desktop / Steam / RetroArch)…"
     cat > "$CONF_DIR/apps.json" <<'EOF'
@@ -720,10 +746,6 @@ EOF
     sed -i "s#__ICON__#$ICON#" "$CONF_DIR/apps.json"
   fi
 
-  # 10.5 Seed the web-UI login from 1Password (first run only). Sunshine hashes the
-  #      password itself via `--creds` (its scheme is internal/version-specific — we
-  #      never reproduce it) and MERGES, so existing Moonlight pairings survive.
-  #      Skipped once creds exist, so re-runs don't reset the salt or bounce the service.
   if [ -f "$CONF_DIR/sunshine_state.json" ] && python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("username") else 1)' "$CONF_DIR/sunshine_state.json" 2>/dev/null; then
     log "  web-UI credentials already set — leaving as-is (clear them to re-seed from 1Password)"
   else
@@ -745,28 +767,15 @@ EOF
     fi
   fi
 
-  # 10.7 Drop-in: wake the monitor before Sunshine starts so KMS capture has a LIT
-  #      connector for its startup encoder probe. A start/restart while the monitor
-  #      is DPMS-off (swayidle blanked it / OLED slept) yields an empty KMS monitor
-  #      list → "Video failed to find working encoder" → no stream + Moonlight
-  #      pairing won't stick. Both lines are non-fatal (- prefix) so a wake failure
-  #      never blocks Sunshine; re-arming swayidle resets a clean ${IDLE_TIMEOUT}s
-  #      countdown so the monitor still sleeps when the box is unused. Drop-in (not
-  #      the packaged unit) so a package upgrade can't clobber it.
   log "  writing Sunshine ExecStartPre wake drop-in…"
   local DROPIN_DIR="$UNIT_DIR/app-dev.lizardbyte.app.Sunshine.service.d"
   mkdir -p "$DROPIN_DIR"
   cat > "$DROPIN_DIR/override.conf" <<EOF
-# Managed by setup_script.sh (configure_sunshine) — edits here are overwritten.
-# Wake the shared monitor before Sunshine starts so KMS capture has a LIT
-# connector for its startup encoder probe. Non-fatal (- prefix) so a wake failure
-# never blocks Sunshine; re-arming swayidle keeps the monitor sleeping when unused.
 [Service]
 ExecStartPre=-$CONF_DIR/display.sh wake
 ExecStartPre=-/usr/bin/systemctl --user restart swayidle.service
 EOF
 
-  # 11. Enable the user services (start inside the sway session after reboot).
   systemctl --user daemon-reload
   systemctl --user enable app-dev.lizardbyte.app.Sunshine.service >/dev/null 2>&1 || true
   systemctl --user enable swayidle.service >/dev/null 2>&1 || true
@@ -774,13 +783,6 @@ EOF
 }
 configure_sunshine
 
-# ─── Provision SMB/CIFS file sharing for /mnt/tank ───────────────────────────
-# Exposes media + downloads on the macOS Finder sidebar (avahi/Bonjour) and the
-# Windows Network tab (wsdd/WS-Discovery). Native host service, not Docker.
-# Fenced to LAN + Tailscale via `bind interfaces only` (docker bridges excluded);
-# still user/password-gated + SMB3-encrypted. Password comes from the
-# "Marlboro NAS - Samba" 1Password item (created above), synced into smbpasswd.
-# Degrades gracefully: warns + skips rather than aborting the whole run.
 configure_samba() {
   log "Provisioning Samba (SMB share of /mnt/tank)…"
   local SMB_USER="bcalegari" WORKGROUP="WORKGROUP" LAN_IFACES="enp4s0 wlp3s0"
@@ -788,7 +790,6 @@ configure_samba() {
 
   [ -d /mnt/tank ] || { log "  WARNING: /mnt/tank not mounted — skipping Samba"; return; }
 
-  # Packages
   local need_pkgs=()
   dpkg -s samba &>/dev/null || need_pkgs+=(samba)
   dpkg -s wsdd  &>/dev/null || need_pkgs+=(wsdd)
@@ -800,7 +801,6 @@ configure_samba() {
     log "  samba + wsdd already installed"
   fi
 
-  # Credential: sync smbpasswd from 1Password
   local SMB_PASS; SMB_PASS=$(pull_field "$SMB_ITEM" password)
   [ -n "$SMB_PASS" ] || { log "  WARNING: '$SMB_ITEM' password blank in 1Password — skipping Samba"; return; }
   id "$SMB_USER" &>/dev/null || { log "  WARNING: unix user '$SMB_USER' missing — skipping Samba"; return; }
@@ -813,27 +813,15 @@ configure_samba() {
   fi
   sudo smbpasswd -e "$SMB_USER" >/dev/null
 
-  # Share dirs (created by the media-dir block above)
   local d
   for d in /mnt/tank/media /mnt/tank/downloads; do
     [ -d "$d" ] || { log "  WARNING: missing share path $d — skipping Samba"; return; }
   done
 
-  # smb.conf — SMB3-only + opportunistic encryption; vfs_fruit for macOS Finder.
-  #
-  # NOTE: the heredoc below has an UNQUOTED delimiter, because it interpolates
-  # WORKGROUP and SMB_USER. So backtick and dollar syntax inside it is live shell
-  # syntax — including on smb.conf comment lines. Two rules when editing it:
-  #   - no backticks in the smb.conf comments (use 'single quotes'); a backtick pair
-  #     gets executed as a command substitution
-  #   - never name a variable that isn't set; under 'set -u' an unset one aborts the
-  #     whole script during expansion, before tee ever runs
-  # Both of those bit this function once already.
-  log "  writing /etc/samba/smb.conf"
-  sudo tee /etc/samba/smb.conf >/dev/null <<EOF
-#
-# Managed by setup_script.sh (configure_samba) — edits here are overwritten.
-#
+  local samba_changed=0 avahi_changed=0 wsdd_changed=0
+  local samba_candidate avahi_candidate wsdd_candidate
+  samba_candidate=$(mktemp)
+  cat > "$samba_candidate" <<EOF
 [global]
    workgroup = ${WORKGROUP}
    server string = Marlboro NAS
@@ -842,27 +830,18 @@ configure_samba() {
    map to guest = never
    passdb backend = tdbsam
 
-   # Access fence by source subnet: LAN + Tailscale (v4 100.64/10, v6 all-ULA
-   # fc00::/7 covers tailnet + LAN ULA) + loopback. NOT 'bind interfaces only'
-   # — that can't serve Tailscale (its point-to-point TUN is dropped by Samba's
-   # interface matching), so smbd binds all addresses and we deny by source
-   # instead. Docker bridges (172.16/12) aren't in the allow-list → denied.
-   # (allow wins over deny; every connection is still auth-gated + SMB3.)
    hosts allow = 127.0.0.0/8 192.168.0.0/24 100.64.0.0/10 fc00::/7 ::1
    hosts deny = 0.0.0.0/0 ::/0
 
-   # Modern, encrypted transport only.
    server min protocol = SMB3_00
    client min protocol = SMB3_00
    smb encrypt = desired
 
-   # No printer sharing.
    load printers = no
    printing = bsd
    printcap name = /dev/null
    disable spoolss = yes
 
-   # macOS interop (vfs_fruit): Finder metadata, resource forks, sparse files.
    vfs objects = catia fruit streams_xattr
    fruit:metadata = stream
    fruit:model = MacSamba
@@ -872,7 +851,6 @@ configure_samba() {
    fruit:wipe_intentionally_left_blank_rfork = yes
    fruit:delete_empty_adfiles = yes
 
-   # Throughput.
    socket options = TCP_NODELAY IPTOS_LOWDELAY
    use sendfile = yes
    aio read size = 1
@@ -900,12 +878,20 @@ configure_samba() {
    create mask = 0664
    directory mask = 0775
 EOF
-  testparm -s /etc/samba/smb.conf >/dev/null 2>&1 \
-    || { log "  WARNING: testparm rejected smb.conf — skipping Samba restart"; return; }
+  if ! testparm -s "$samba_candidate" >/dev/null 2>&1; then
+    rm -f "$samba_candidate"
+    log "  WARNING: testparm rejected smb.conf — skipping Samba restart"
+    return
+  fi
+  if ! sudo cmp -s "$samba_candidate" /etc/samba/smb.conf; then
+    sudo install -D -m 0644 "$samba_candidate" /etc/samba/smb.conf
+    samba_changed=1
+    log "  updated /etc/samba/smb.conf"
+  fi
+  rm -f "$samba_candidate"
 
-  # macOS discovery (avahi/Bonjour): advertise _smb._tcp for the Finder sidebar.
-  log "  writing /etc/avahi/services/samba.service"
-  sudo tee /etc/avahi/services/samba.service >/dev/null <<'EOF'
+  avahi_candidate=$(mktemp)
+  cat > "$avahi_candidate" <<'EOF'
 <?xml version="1.0" standalone='no'?>
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <service-group>
@@ -921,15 +907,18 @@ EOF
   </service>
 </service-group>
 EOF
+  if ! sudo cmp -s "$avahi_candidate" /etc/avahi/services/samba.service; then
+    sudo install -D -m 0644 "$avahi_candidate" /etc/avahi/services/samba.service
+    avahi_changed=1
+    log "  updated /etc/avahi/services/samba.service"
+  fi
+  rm -f "$avahi_candidate"
 
-  # Windows discovery (wsdd/WS-Discovery). The Ubuntu package ships only the
-  # binary — no systemd unit — so install our own, scoped to the LAN interfaces
-  # + workgroup. (macOS uses avahi above; wsdd is Windows-only.)
   local WSDD_IFACE_ARGS="" i
   for i in ${LAN_IFACES}; do WSDD_IFACE_ARGS+=" --interface ${i}"; done
   if command -v wsdd &>/dev/null; then
-    log "  installing wsdd.service (Windows discovery)"
-    sudo tee /etc/systemd/system/wsdd.service >/dev/null <<EOF
+    wsdd_candidate=$(mktemp)
+    cat > "$wsdd_candidate" <<EOF
 [Unit]
 Description=Web Services Dynamic Discovery host daemon (Windows network browsing)
 Documentation=man:wsdd(8)
@@ -947,32 +936,113 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-    sudo systemctl daemon-reload
+    if ! sudo cmp -s "$wsdd_candidate" /etc/systemd/system/wsdd.service; then
+      sudo install -D -m 0644 "$wsdd_candidate" /etc/systemd/system/wsdd.service
+      sudo systemctl daemon-reload
+      wsdd_changed=1
+      log "  updated /etc/systemd/system/wsdd.service"
+    fi
+    rm -f "$wsdd_candidate"
   fi
 
-  # Daemons: smbd is core; nmbd/wsdd/avahi are best-effort discovery.
   sudo systemctl enable smbd >/dev/null 2>&1 || true
-  sudo systemctl restart smbd \
-    || { log "  WARNING: smbd failed to start — check: sudo systemctl status smbd"; return; }
-  for i in nmbd wsdd avahi-daemon; do
-    sudo systemctl enable "$i" >/dev/null 2>&1 || true
-    sudo systemctl restart "$i" || log "  WARNING: $i failed to (re)start — SMB works, its discovery degraded"
-  done
+  if [ "$samba_changed" -eq 1 ] || ! sudo systemctl is-active --quiet smbd; then
+    sudo systemctl restart smbd \
+      || { log "  WARNING: smbd failed to start — check: sudo systemctl status smbd"; return; }
+  fi
+  sudo systemctl enable nmbd >/dev/null 2>&1 || true
+  if [ "$samba_changed" -eq 1 ] || ! sudo systemctl is-active --quiet nmbd; then
+    sudo systemctl restart nmbd || log "  WARNING: nmbd failed to start — SMB discovery degraded"
+  fi
+  sudo systemctl enable avahi-daemon >/dev/null 2>&1 || true
+  if [ "$avahi_changed" -eq 1 ] || ! sudo systemctl is-active --quiet avahi-daemon; then
+    sudo systemctl restart avahi-daemon || log "  WARNING: avahi-daemon failed to start — SMB discovery degraded"
+  fi
+  if command -v wsdd &>/dev/null; then
+    sudo systemctl enable wsdd >/dev/null 2>&1 || true
+    if [ "$wsdd_changed" -eq 1 ] || ! sudo systemctl is-active --quiet wsdd; then
+      sudo systemctl restart wsdd || log "  WARNING: wsdd failed to start — SMB discovery degraded"
+    fi
+  fi
   log "  Samba live — shares: media (rw), downloads (rw); user $SMB_USER"
 }
+
+sync_arr_api_keys() {
+  local spec title config key current attempt
+  for spec in \
+    "Marlboro NAS - Sonarr|$SCRIPT_DIR/services/sonarr/config/config.xml" \
+    "Marlboro NAS - Radarr|$SCRIPT_DIR/services/radarr/config/config.xml"; do
+    IFS='|' read -r title config <<<"$spec"
+    key=""
+    for attempt in {1..60}; do
+      key=$(grep -oE '<ApiKey>[^<]+' "$config" 2>/dev/null | sed 's/<ApiKey>//' || true)
+      [ -n "$key" ] && break
+      sleep 2
+    done
+    [ -n "$key" ] || { log "WARNING: $title API key is not available yet"; continue; }
+    current=$(pull_field "$title" api_key)
+    if [ "$current" = "$key" ]; then
+      log "$title API key already matches 1Password"
+    else
+      op item edit "$title" --vault "$VAULT" "api_key[text]=$key" >/dev/null
+      log "$title API key stored in 1Password"
+    fi
+  done
+}
+
+wait_for_service_initialization() {
+  local attempt prowlarr_ready npm_ready panel_ready
+  for attempt in {1..100}; do
+    prowlarr_ready=0
+    npm_ready=0
+    panel_ready=0
+    grep -q '<ApiKey>[^<]' "$SCRIPT_DIR/services/prowlarr/config/config.xml" 2>/dev/null && prowlarr_ready=1
+    curl -fsS -m2 http://localhost:81/api/ >/dev/null 2>&1 && npm_ready=1
+    [ "$(docker inspect --format '{{.State.Health.Status}}' pterodactyl-panel 2>/dev/null || true)" = "healthy" ] \
+      && panel_ready=1
+    [ "$prowlarr_ready" -eq 1 ] && [ "$npm_ready" -eq 1 ] && [ "$panel_ready" -eq 1 ] && return
+    sleep 3
+  done
+  log "WARNING: some services are still initializing; their reconciliation may be deferred"
+}
+
+reconcile_sonarr_login_after_start() {
+  SONARR_API_KEY=$(pull_field "Marlboro NAS - Sonarr" api_key)
+  SONARR_USER=$(pull_field "Marlboro NAS - Sonarr" username)
+  SONARR_PASS=$(pull_field "Marlboro NAS - Sonarr" password)
+  set +e
+  reconcile_sonarr_login
+  local result=$?
+  set -e
+  case "$result" in
+    0) log "Sonarr WebUI credentials already match 1Password" ;;
+    1) log "Sonarr WebUI credentials reconciled from 1Password" ;;
+    2) log "WARNING: Sonarr API is not ready; rerun setup later" ;;
+  esac
+}
+
+start_and_reconcile_stack() {
+  log "Starting the Docker stack"
+  (cd "$SCRIPT_DIR" && PLEX_CLAIM="$PLEX_CLAIM_VALUE" docker compose up -d)
+  wait_for_service_initialization
+  sync_arr_api_keys
+  write_env_file
+  (cd "$SCRIPT_DIR" && PLEX_CLAIM="$PLEX_CLAIM_VALUE" docker compose up -d)
+  reconcile_sonarr_login_after_start
+  "$SCRIPT_DIR/setup_services.sh"
+  write_env_file
+  (cd "$SCRIPT_DIR" && docker compose up -d glance unpackerr)
+}
+
 configure_samba
-
-# ─── Summary ──────────────────────────────────────────────────────────────────
-
+start_and_reconcile_stack
 echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Setup complete. .env written to: $ENV_FILE"
 echo "  Tag: $TAG | Vault: $VAULT"
 echo ""
 if [ "$REBOOT_NEEDED" -eq 1 ]; then
   echo "  ! REBOOT REQUIRED (Sunshine): applies the sway autologin session + 'input' group."
-  echo "    After reboot: one-time Sunshine web-UI wizard + Moonlight pairing — README Part 7."
+  echo "    After reboot: finish the Sunshine web-UI setup and pair Moonlight."
   echo ""
 fi
-echo "  Ready to run: docker compose up -d"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Stack started and reconciled."
