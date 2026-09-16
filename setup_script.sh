@@ -7,6 +7,10 @@ ENV_FILE="$SCRIPT_DIR/.env"
 TAG="marlboro-nas"
 VAULT="Private"
 REBOOT_NEEDED=0
+COMPOSE_SERVICES=()
+if [ -n "${MARLBORO_COMPOSE_SERVICES:-}" ]; then
+  read -r -a COMPOSE_SERVICES <<<"$MARLBORO_COMPOSE_SERVICES"
+fi
 
 
 log() { echo -e "\033[1;32m==>\033[0m $1" >&2; }
@@ -73,7 +77,8 @@ install_onepassword_cli() {
 }
 
 ensure_docker_access() {
-  sudo systemctl enable --now docker >/dev/null
+  sudo systemctl enable docker >/dev/null
+  sudo systemctl is-active --quiet docker || sudo systemctl start docker
   docker info >/dev/null 2>&1 && return
   sudo docker info >/dev/null 2>&1 || err "Docker daemon is unavailable."
   local user_name reexec_command
@@ -224,7 +229,7 @@ prompt_external_item() {
 prompt_plex_claim() {
   PLEX_CLAIM_VALUE=""
   grep -qE 'PlexOnlineToken="[^"]+"' "$SCRIPT_DIR/services/plex/config/Preferences.xml" 2>/dev/null && return
-  [ -t 0 ] || return
+  [ -t 0 ] || return 0
   read -r -s -p "Plex claim token from https://plex.tv/claim (Enter to skip): " PLEX_CLAIM_VALUE
   echo ""
 }
@@ -494,7 +499,7 @@ MEDIA_DIRS=(/mnt/tank/media/movies /mnt/tank/media/tv /mnt/tank/downloads/comple
 
 if [ -d /mnt/tank ]; then
   for dir in "${MEDIA_DIRS[@]}"; do
-    [ -d "$dir" ] || mkdir -p "$dir"
+    [ -d "$dir" ] || sudo mkdir -p "$dir"
   done
 
   needs_fix=false
@@ -521,7 +526,7 @@ PTERO_DIRS=(/mnt/tank/pterodactyl/volumes /mnt/tank/pterodactyl/archives
             /mnt/tank/pterodactyl/backups /mnt/tank/pterodactyl/logs /tmp/pterodactyl)
 
 for dir in "${PTERO_DIRS[@]}"; do
-  [ -d "$dir" ] || { mkdir -p "$dir" && log "Created $dir"; }
+  [ -d "$dir" ] || { sudo mkdir -p "$dir" && log "Created $dir"; }
 done
 
 for dir in db panel-var panel-logs wings-etc; do
@@ -781,7 +786,7 @@ EOF
   systemctl --user enable swayidle.service >/dev/null 2>&1 || true
   log "  Sunshine provisioned (services enabled; start on next sway session)"
 }
-configure_sunshine
+[ "${MARLBORO_SKIP_SUNSHINE:-0}" = "1" ] || configure_sunshine
 
 configure_samba() {
   log "Provisioning Samba (SMB share of /mnt/tank)…"
@@ -968,11 +973,12 @@ EOF
 }
 
 sync_arr_api_keys() {
-  local spec title config key current attempt
+  local spec service title config key current attempt
   for spec in \
-    "Marlboro NAS - Sonarr|$SCRIPT_DIR/services/sonarr/config/config.xml" \
-    "Marlboro NAS - Radarr|$SCRIPT_DIR/services/radarr/config/config.xml"; do
-    IFS='|' read -r title config <<<"$spec"
+    "sonarr|Marlboro NAS - Sonarr|$SCRIPT_DIR/services/sonarr/config/config.xml" \
+    "radarr|Marlboro NAS - Radarr|$SCRIPT_DIR/services/radarr/config/config.xml"; do
+    IFS='|' read -r service title config <<<"$spec"
+    docker inspect "$service" >/dev/null 2>&1 || continue
     key=""
     for attempt in {1..60}; do
       key=$(grep -oE '<ApiKey>[^<]+' "$config" 2>/dev/null | sed 's/<ApiKey>//' || true)
@@ -991,16 +997,34 @@ sync_arr_api_keys() {
 }
 
 wait_for_service_initialization() {
-  local attempt prowlarr_ready npm_ready panel_ready
+  local attempt prowlarr_ready npm_ready panel_ready jellyfin_ready portainer_ready forgejo_ready scrutiny_ready
   for attempt in {1..100}; do
-    prowlarr_ready=0
-    npm_ready=0
-    panel_ready=0
-    grep -q '<ApiKey>[^<]' "$SCRIPT_DIR/services/prowlarr/config/config.xml" 2>/dev/null && prowlarr_ready=1
-    curl -fsS -m2 http://localhost:81/api/ >/dev/null 2>&1 && npm_ready=1
-    [ "$(docker inspect --format '{{.State.Health.Status}}' pterodactyl-panel 2>/dev/null || true)" = "healthy" ] \
-      && panel_ready=1
-    [ "$prowlarr_ready" -eq 1 ] && [ "$npm_ready" -eq 1 ] && [ "$panel_ready" -eq 1 ] && return
+    prowlarr_ready=1 npm_ready=1 panel_ready=1 jellyfin_ready=1
+    portainer_ready=1 forgejo_ready=1 scrutiny_ready=1
+    if docker inspect prowlarr >/dev/null 2>&1; then
+      grep -q '<ApiKey>[^<]' "$SCRIPT_DIR/services/prowlarr/config/config.xml" 2>/dev/null || prowlarr_ready=0
+    fi
+    if docker inspect nginx-proxy-manager >/dev/null 2>&1; then
+      curl -fsS -m2 http://localhost:81/api/ >/dev/null 2>&1 || npm_ready=0
+    fi
+    if docker inspect pterodactyl-panel >/dev/null 2>&1; then
+      [ "$(docker inspect --format '{{.State.Health.Status}}' pterodactyl-panel 2>/dev/null || true)" = "healthy" ] || panel_ready=0
+    fi
+    if docker inspect jellyfin >/dev/null 2>&1; then
+      curl -fsS -m2 http://localhost:8096/System/Info/Public >/dev/null 2>&1 || jellyfin_ready=0
+    fi
+    if docker inspect portainer >/dev/null 2>&1; then
+      curl -sS -m2 -o /dev/null http://localhost:9000/api/users/admin/check || portainer_ready=0
+    fi
+    if docker inspect forgejo >/dev/null 2>&1; then
+      curl -fsS -m2 http://localhost:3003/api/healthz >/dev/null 2>&1 || forgejo_ready=0
+    fi
+    if docker inspect scrutiny >/dev/null 2>&1; then
+      curl -fsS -m2 http://localhost:8085/api/settings >/dev/null 2>&1 || scrutiny_ready=0
+    fi
+    if [ "$prowlarr_ready$npm_ready$panel_ready$jellyfin_ready$portainer_ready$forgejo_ready$scrutiny_ready" = "1111111" ]; then
+      return
+    fi
     sleep 3
   done
   log "WARNING: some services are still initializing; their reconciliation may be deferred"
@@ -1023,18 +1047,22 @@ reconcile_sonarr_login_after_start() {
 
 start_and_reconcile_stack() {
   log "Starting the Docker stack"
-  (cd "$SCRIPT_DIR" && PLEX_CLAIM="$PLEX_CLAIM_VALUE" docker compose up -d)
+  (cd "$SCRIPT_DIR" && PLEX_CLAIM="$PLEX_CLAIM_VALUE" docker compose up -d "${COMPOSE_SERVICES[@]}")
   wait_for_service_initialization
   sync_arr_api_keys
   write_env_file
-  (cd "$SCRIPT_DIR" && PLEX_CLAIM="$PLEX_CLAIM_VALUE" docker compose up -d)
+  (cd "$SCRIPT_DIR" && PLEX_CLAIM="$PLEX_CLAIM_VALUE" docker compose up -d "${COMPOSE_SERVICES[@]}")
   reconcile_sonarr_login_after_start
   "$SCRIPT_DIR/setup_services.sh"
   write_env_file
-  (cd "$SCRIPT_DIR" && docker compose up -d glance unpackerr)
+  if [ "${#COMPOSE_SERVICES[@]}" -eq 0 ]; then
+    (cd "$SCRIPT_DIR" && docker compose up -d glance unpackerr)
+  else
+    (cd "$SCRIPT_DIR" && PLEX_CLAIM="$PLEX_CLAIM_VALUE" docker compose up -d "${COMPOSE_SERVICES[@]}")
+  fi
 }
 
-configure_samba
+[ "${MARLBORO_SKIP_SAMBA:-0}" = "1" ] || configure_samba
 start_and_reconcile_stack
 echo ""
 echo "  Setup complete. .env written to: $ENV_FILE"

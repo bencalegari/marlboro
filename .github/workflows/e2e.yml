@@ -1,0 +1,56 @@
+name: End-to-end setup
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        services:
+          - adguard qbittorrent sonarr radarr prowlarr jellyfin
+          - portainer forgejo scrutiny nginx-proxy-manager pterodactyl-panel
+    env:
+      COMPOSE_FILE: docker-compose.yml:tests/e2e/docker-compose.yml
+      MARLBORO_COMPOSE_SERVICES: ${{ matrix.services }}
+      MARLBORO_SKIP_SAMBA: "1"
+      MARLBORO_SKIP_SUNSHINE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare disposable host
+        run: |
+          chmod +x tests/e2e/bin/op tests/e2e/verify.sh
+          echo "$GITHUB_WORKSPACE/tests/e2e/bin" >> "$GITHUB_PATH"
+          echo "OP_MOCK_STORE=$RUNNER_TEMP/op-items.json" >> "$GITHUB_ENV"
+          sudo mkdir -p /mnt/tank "$RUNNER_TEMP/tank"
+          sudo mount --bind "$RUNNER_TEMP/tank" /mnt/tank
+      - name: Provision
+        run: |
+          timeout 45m ./setup_script.sh
+          for service in $MARLBORO_COMPOSE_SERVICES; do
+            docker inspect --format '{{.Id}}' "$service"
+          done > "$RUNNER_TEMP/container-ids-before"
+          sha256sum "$OP_MOCK_STORE" > "$RUNNER_TEMP/op-store-before"
+      - name: Verify idempotency
+        run: |
+          timeout 20m ./setup_script.sh
+          for service in $MARLBORO_COMPOSE_SERVICES; do
+            docker inspect --format '{{.Id}}' "$service"
+          done > "$RUNNER_TEMP/container-ids-after"
+          diff -u "$RUNNER_TEMP/container-ids-before" "$RUNNER_TEMP/container-ids-after"
+          sha256sum --check "$RUNNER_TEMP/op-store-before"
+      - name: Verify result
+        run: tests/e2e/verify.sh
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail=200
+          systemctl status docker systemd-resolved --no-pager || true

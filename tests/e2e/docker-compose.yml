@@ -1,0 +1,5 @@
+services:
+  jellyfin:
+    devices: !reset []
+  scrutiny:
+    devices: !reset []

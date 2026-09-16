@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+
+store_path = Path(os.environ["OP_MOCK_STORE"])
+
+
+def load_items():
+    if not store_path.exists():
+        return {}
+    return json.loads(store_path.read_text())
+
+
+def save_items(items):
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate = store_path.with_suffix(".tmp")
+    candidate.write_text(json.dumps(items, sort_keys=True))
+    candidate.replace(store_path)
+
+
+def option(args, name):
+    if name not in args:
+        return ""
+    return args[args.index(name) + 1]
+
+
+def assignments(args):
+    values = {}
+    for argument in args:
+        if "=" not in argument or argument.startswith("--"):
+            continue
+        key, value = argument.split("=", 1)
+        values[key.removesuffix("[text]")] = value
+    return values
+
+
+args = sys.argv[1:]
+if not args:
+    raise SystemExit(1)
+
+if args[0] == "whoami":
+    if "--format=json" in args:
+        print('{"email":"ci@marlboro.invalid"}')
+    else:
+        print("ci@marlboro.invalid")
+    raise SystemExit(0)
+
+if args[0] == "signin":
+    raise SystemExit(0)
+
+if args[:2] == ["item", "get"]:
+    items = load_items()
+    title = args[2]
+    if title not in items:
+        raise SystemExit(1)
+    field = option(args, "--fields")
+    if field:
+        value = items[title].get(field)
+        if value is None:
+            raise SystemExit(1)
+        print(value)
+    else:
+        print(title)
+    raise SystemExit(0)
+
+if args[:2] == ["item", "create"]:
+    items = load_items()
+    title = option(args, "--title")
+    values = assignments(args)
+    if any(argument.startswith("--generate-password=") for argument in args):
+        digest = hashlib.sha256(title.encode()).hexdigest()
+        values["password"] = f"Ci{digest[:30]}"
+    items[title] = values
+    save_items(items)
+    raise SystemExit(0)
+
+if args[:2] == ["item", "edit"]:
+    items = load_items()
+    title = args[2]
+    items.setdefault(title, {}).update(assignments(args[3:]))
+    save_items(items)
+    raise SystemExit(0)
+
+raise SystemExit(1)

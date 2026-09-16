@@ -339,7 +339,7 @@ AG_YAML="$SCRIPT_DIR/services/adguard/conf/AdGuardHome.yaml"
 
 initialize_adguard() {
   curl -fsS -m5 http://localhost:3001/control/status >/dev/null 2>&1 && return
-  curl -fsS -m5 http://localhost:3000/control/install/get_addresses >/dev/null 2>&1 || return
+  curl -fsS -m5 http://localhost:3000/control/install/get_addresses >/dev/null 2>&1 || return 0
   command -v op >/dev/null && op whoami >/dev/null 2>&1 \
     || { warn "  sign in to 1Password to initialize AdGuard"; return; }
   local username password body
@@ -356,6 +356,7 @@ initialize_adguard() {
 
 configure_adguard() {
   log "AdGuard: upstream DNS, rate limit, blocklists"
+  docker inspect adguard >/dev/null 2>&1 || { warn "  AdGuard not running — skipping"; return; }
   initialize_adguard
   local attempt
   for attempt in {1..30}; do
@@ -743,17 +744,17 @@ configure_npm_admin_credentials() {
     return
   fi
   token=$(npm_login_token admin@example.com changeme)
-  [ -n "$token" ] || return
+  [ -n "$token" ] || return 0
   user_id=$(curl -fsS -m10 -H "Authorization: Bearer $token" "$NPM/api/users" \
     | jq -r '[.[] | select(.roles | index("admin"))][0].id // empty')
-  [ -n "$user_id" ] || return
+  [ -n "$user_id" ] || return 0
   user_body=$(jq -n --arg email "$email" \
     '{name:"Administrator",nickname:"Admin",email:$email,roles:["admin"],is_disabled:false}')
   curl -fsS -m10 -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-    -d "$user_body" "$NPM/api/users/$user_id" >/dev/null || return
+    -d "$user_body" "$NPM/api/users/$user_id" >/dev/null || return 0
   curl -fsS -m10 -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
     -d "$(jq -n --arg password "$password" '{type:"password",current:"changeme",secret:$password}')" \
-    "$NPM/api/users/$user_id/auth" >/dev/null || return
+    "$NPM/api/users/$user_id/auth" >/dev/null || return 0
   npm_login_token "$email" "$password"
 }
 
@@ -818,12 +819,12 @@ configure_forgejo_admin() {
   username=$(op item get "Marlboro NAS - Forgejo" --vault Private --fields username --reveal 2>/dev/null || true)
   password=$(op item get "Marlboro NAS - Forgejo" --vault Private --fields password --reveal 2>/dev/null || true)
   [ -n "$username" ] && [ -n "$password" ] || { warn "  Forgejo credentials are unavailable"; return; }
-  if docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T forgejo forgejo admin user list 2>/dev/null \
+  if docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T --user 1000:1000 forgejo forgejo admin user list 2>/dev/null \
       | awk -v username="$username" '$2 == username { found=1 } END { exit !found }'; then
     log "  admin user exists"
     return
   fi
-  docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T forgejo forgejo admin user create \
+  docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T --user 1000:1000 forgejo forgejo admin user create \
     --username "$username" --password "$password" --email bencalegari@navapbc.com \
     --admin --must-change-password=false >/dev/null \
     && log "  admin user created" \
@@ -834,11 +835,11 @@ configure_scrutiny() {
   log "Scrutiny: metric status threshold"
   local url=http://localhost:8085/api/settings current
   current=$(curl -fsS -m5 "$url" 2>/dev/null) || { warn "  Scrutiny unreachable — skipping"; return; }
-  if printf '%s' "$current" | jq -e '.metrics.status_threshold == 1' >/dev/null 2>&1; then
+  if printf '%s' "$current" | jq -e '.settings.metrics.status_threshold == 1' >/dev/null 2>&1; then
     log "  status threshold already Smart"
     return
   fi
-  printf '%s' "$current" | jq '.metrics.status_threshold = 1' \
+  printf '%s' "$current" | jq '.settings | .metrics.status_threshold = 1' \
     | curl -fsS -m10 -X POST "$url" -H 'Content-Type: application/json' --data-binary @- >/dev/null \
     && log "  status threshold set to Smart" \
     || warn "  failed to set status threshold"
@@ -858,13 +859,15 @@ configure_portainer_admin() {
   for attempt in {1..30}; do
     setup_token=$(docker logs --since 1m portainer 2>&1 \
       | sed -n 's/.*setup_token=\([^[:space:]]*\).*/\1/p' | tail -n 1 || true)
-    [ -n "$setup_token" ] && break
+    status=$(curl -sS -m2 -o /dev/null -w '%{http_code}' http://localhost:9000/api/users/admin/check || true)
+    [ -n "$setup_token" ] && [ "$status" = "404" ] && break
     sleep 1
   done
   [ -n "${setup_token:-}" ] || { warn "  Portainer setup token is unavailable"; return; }
+  [ "$status" = "404" ] || { warn "  Portainer API did not become ready"; return; }
   curl -fsS -m10 -X POST http://localhost:9000/api/users/admin/init \
     -H 'Content-Type: application/json' -H "X-Setup-Token: $setup_token" \
-    -d "$(jq -n --arg username "$username" --arg password "$password" '{Username:$username,Password:$password}')" >/dev/null \
+    -d "$(jq -n --arg username "$username" --arg password "$password" '{username:$username,password:$password}')" >/dev/null \
     && log "  admin user created" \
     || warn "  failed to create the admin user"
 }
@@ -912,6 +915,7 @@ configure_jellyfin() {
     curl -fsS -m10 -X POST http://localhost:8096/Startup/Configuration \
       -H 'Content-Type: application/json' \
       -d '{"UICulture":"en-US","MetadataCountryCode":"US","PreferredMetadataLanguage":"en"}' >/dev/null \
+      && curl -fsS -m10 http://localhost:8096/Startup/User >/dev/null \
       && curl -fsS -m10 -X POST http://localhost:8096/Startup/User \
         -H 'Content-Type: application/json' \
         -d "$(jq -n --arg name "$username" --arg password "$password" '{Name:$name,Password:$password}')" >/dev/null \

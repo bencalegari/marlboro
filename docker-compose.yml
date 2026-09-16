@@ -632,6 +632,9 @@ services:
       - homelab
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      - INITIAL_ADMIN_EMAIL=${NGINX_EMAIL_ID}
+      - INITIAL_ADMIN_PASSWORD=${NGINX_PASSWORD}
     volumes:
       - ./services/nginx-proxy-manager/config:/data
       - ./services/nginx-proxy-manager/letsencrypt:/etc/letsencrypt
