@@ -64,6 +64,16 @@ Import `services/pterodactyl/egg-valheim.json` and create the Valheim server wit
 
 Do not rotate `PTERO_APP_KEY`; it encrypts the Wings node token. Back up `services/pterodactyl/db`, `services/pterodactyl/panel-var`, and `/mnt/tank/pterodactyl` together.
 
+## Tests
+
+The SMS bridge has unit tests. No dependencies, no Docker:
+
+```bash
+python3 -m unittest discover -s tests/unit -b
+```
+
+They run on every push. `tests/e2e` provisions a disposable host and is triggered manually from the Actions tab.
+
 ## Operations
 
 ```bash

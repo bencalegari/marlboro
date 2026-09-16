@@ -157,12 +157,14 @@ def mark_disclosed(phone):
         )
 
 
-def put_session(phone, choices):
+def put_session(phone, state):
+    """state is {"kind": "titles", "choices": [...]} or
+    {"kind": "seasons", "choice": {...}, "seasons": [...]}."""
     with db() as c:
         c.execute(
             "INSERT INTO session(phone, ts, choices) VALUES(?,?,?) "
             "ON CONFLICT(phone) DO UPDATE SET ts=excluded.ts, choices=excluded.choices",
-            (phone, int(time.time()), json.dumps(choices)),
+            (phone, int(time.time()), json.dumps(state)),
         )
 
 
@@ -171,7 +173,17 @@ def get_active_session(phone):
     with db() as c:
         c.execute("DELETE FROM session WHERE ts < ?", (now - SESSION_TTL_SECONDS,))
         row = c.execute("SELECT choices FROM session WHERE phone=?", (phone,)).fetchone()
-    return json.loads(row["choices"]) if row else None
+    if not row:
+        return None
+    state = json.loads(row["choices"])
+    if isinstance(state, list):  # session written before seasons existed
+        state = {"kind": "titles", "choices": state}
+    return state
+
+
+def clear_session(phone):
+    with db() as c:
+        c.execute("DELETE FROM session WHERE phone=?", (phone,))
 
 
 _seerr_key = None
@@ -250,11 +262,29 @@ def search(query):
     return out
 
 
-def create_request(choice, user_id):
+def create_request(choice, user_id, seasons=None):
     body = {"mediaType": choice["mediaType"], "mediaId": choice["tmdbId"], "userId": user_id}
     if choice["mediaType"] == "tv":
-        body["seasons"] = "all"
+        body["seasons"] = seasons or "all"
     return call_seerr("POST", "/api/v1/request", body)
+
+
+def tv_open_seasons(tmdb_id):
+    """Season numbers with aired episodes that nobody has requested yet."""
+    detail = call_seerr("GET", f"/api/v1/tv/{tmdb_id}")
+    taken = {
+        s.get("seasonNumber"): s.get("status")
+        for s in ((detail.get("mediaInfo") or {}).get("seasons") or [])
+    }
+    open_seasons = []
+    for s in detail.get("seasons") or []:
+        n = s.get("seasonNumber")
+        if not n or not s.get("episodeCount"):  # skip specials (0) and unaired
+            continue
+        if taken.get(n) in (ST_PENDING, ST_PROCESSING, ST_PARTIAL, ST_AVAILABLE):
+            continue
+        open_seasons.append(n)
+    return sorted(open_seasons)
 
 
 def valid_twilio_signature(params, signature):
@@ -325,6 +355,42 @@ def pick_range(n):
     return "1" if n == 1 else f"1-{n}"
 
 
+def fmt_seasons(nums):
+    """[1,2,3,5] -> "1-3, 5" so long season lists still fit one text."""
+    nums = sorted(set(nums))
+    parts, i = [], 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            j += 1
+        parts.append(str(nums[i]) if i == j else f"{nums[i]}-{nums[j]}")
+        i = j + 1
+    return ", ".join(parts)
+
+
+def parse_season_pick(text, open_seasons):
+    """Season numbers from "3", "3-5", "3,5", or "ALL". None if it isn't a pick."""
+    text = text.strip()
+    if re.fullmatch(r"all", text, re.I):
+        return list(open_seasons)
+    if not re.fullmatch(r"[\d\s,-]+", text):
+        return None
+    picked = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        span = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
+        if span:
+            lo, hi = sorted((int(span.group(1)), int(span.group(2))))
+            picked.update(range(lo, hi + 1))
+        elif part.isdigit():
+            picked.add(int(part))
+        else:
+            return None
+    return sorted(picked)
+
+
 def handle_text(phone, name, text):
     text = (text or "").strip()
     if not text:
@@ -337,8 +403,13 @@ def handle_text(phone, name, text):
     if word in HELP_KEYWORDS:
         return HELP_TEXT
 
-    if text.isdigit():
-        choices = get_active_session(phone)
+    session = get_active_session(phone)
+    if session and session["kind"] == "seasons":
+        reply = handle_season_pick(phone, name, session, text)
+        if reply is not None:
+            return reply  # None means it wasn't a pick, so fall through to search
+    elif text.isdigit():
+        choices = session["choices"] if session else None
         if not choices:
             return "That pick expired. Text a title to search again."
         idx = int(text)
@@ -356,19 +427,64 @@ def handle_text(phone, name, text):
         return f'Nothing found for "{text[:60]}". Try the exact title.'
 
     if len(choices) == 1 and choices[0]["status"] == ST_AVAILABLE:
-        return f"{choices[0]['title']} is already on Jellyfin."
+        return do_request(phone, name, choices[0])
 
-    put_session(phone, choices)
+    put_session(phone, {"kind": "titles", "choices": choices})
     lines = [fmt_choice(i, c) for i, c in enumerate(choices, 1)]
     return "\n".join(lines) + f"\nReply {pick_range(len(choices))} to request."
 
 
-def do_request(phone, name, choice):
-    label = choice["title"]
+def nothing_left_msg(choice):
     if choice["status"] == ST_AVAILABLE:
-        return f"{label} is already on Jellyfin."
-    if choice["status"] in (ST_PENDING, ST_PROCESSING, ST_PARTIAL):
-        return f"{label} is already requested — you'll get a text when it lands."
+        return f"{choice['title']} is already on Jellyfin."
+    return f"{choice['title']} is already requested — you'll get a text when it lands."
+
+
+def do_request(phone, name, choice):
+    in_seerr = choice["status"] in (ST_PENDING, ST_PROCESSING, ST_PARTIAL, ST_AVAILABLE)
+    if choice["mediaType"] == "tv" and in_seerr:
+        return offer_seasons(phone, choice)
+    if in_seerr:
+        return nothing_left_msg(choice)
+    return submit_request(phone, name, choice, None)
+
+
+def offer_seasons(phone, choice):
+    """A series Seerr already knows may still have seasons nobody asked for."""
+    try:
+        open_seasons = tv_open_seasons(choice["tmdbId"])
+    except Exception as e:
+        log(f"ERROR: season lookup for {choice['title']!r} failed: {e}")
+        return nothing_left_msg(choice)
+    if not open_seasons:
+        return nothing_left_msg(choice)
+
+    put_session(phone, {"kind": "seasons", "choice": choice, "seasons": open_seasons})
+    return (
+        f"{choice['title'][:40]}: seasons {fmt_seasons(open_seasons)} aren't requested yet.\n"
+        "Reply which to add (e.g. 2, 2-4, 2,4) or ALL."
+    )
+
+
+def handle_season_pick(phone, name, session, text):
+    choice, open_seasons = session["choice"], session["seasons"]
+    picked = parse_season_pick(text, open_seasons)
+    if picked is None:
+        return None
+    wanted = [n for n in picked if n in open_seasons]
+    if not wanted:
+        return (
+            f"Only seasons {fmt_seasons(open_seasons)} can be added for "
+            f"{choice['title'][:40]}. Reply those numbers or ALL."
+        )
+    clear_session(phone)
+    return submit_request(phone, name, choice, wanted)
+
+
+def submit_request(phone, name, choice, seasons):
+    label = choice["title"]
+    if seasons:
+        label = f"{label} S{fmt_seasons(seasons)}"
 
     user_id = find_seerr_user_id(name)
     if user_id is None:
@@ -376,7 +492,7 @@ def do_request(phone, name, choice):
         return "Your account isn't linked yet. Ping Ben."
 
     try:
-        res = create_request(choice, user_id)
+        res = create_request(choice, user_id, seasons)
     except urllib.error.HTTPError as e:
         detail = e.read()[:300].decode(errors="replace")
         log(f"ERROR: request {label!r} failed {e.code}: {detail}")
