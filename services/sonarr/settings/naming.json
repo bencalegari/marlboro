@@ -5,7 +5,7 @@
   "dailyEpisodeFormat": "{Series Title} - {Air-Date} - {Episode Title} {Quality Full}",
   "id": 1,
   "multiEpisodeStyle": 5,
-  "renameEpisodes": false,
+  "renameEpisodes": true,
   "replaceIllegalCharacters": true,
   "seasonFolderFormat": "Season {season}",
   "seriesFolderFormat": "{Series Title}",
