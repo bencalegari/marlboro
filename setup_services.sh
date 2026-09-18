@@ -438,6 +438,8 @@ PTERO_ALLOC_PORTS=(2456 2457)
 PTERO_VALHEIM_SERVER=Valheim
 PTERO_VALHEIM_CROSSPLAY=1
 PTERO_VALHEIM_AUTO_UPDATE=1
+# SteamID64 per entry (crossplay players use their PlayFab ID instead)
+PTERO_VALHEIM_ADMINS=(76561197981887090)  # cousinben / Bengina
 LEGACY_PTERO_VALHEIM_SCHEDULE="Nightly update restart"
 
 ptero_sql() {
@@ -548,6 +550,36 @@ reconcile_valheim_variables() {
       warn "  $variable_name $current_value → $desired_value; restart Valheim to apply it"
     fi
   done
+}
+
+reconcile_valheim_adminlist() {
+  local uuid list_path owner candidate
+  uuid=$(ptero_sql "SELECT uuid FROM servers WHERE name='$PTERO_VALHEIM_SERVER' LIMIT 1;")
+  if [ -z "$uuid" ]; then
+    log "  no $PTERO_VALHEIM_SERVER server yet - skipping admin list"
+    return
+  fi
+  list_path="$PTERO_ROOT/volumes/$uuid/.config/unity3d/IronGate/Valheim/adminlist.txt"
+  if ! sudo test -f "$list_path"; then
+    log "  $PTERO_VALHEIM_SERVER hasn't written adminlist.txt yet - skipping"
+    return
+  fi
+  candidate=$(mktemp)
+  printf '// List admin players ID  ONE per line\n' > "$candidate"
+  if [ ${#PTERO_VALHEIM_ADMINS[@]} -gt 0 ]; then
+    printf '%s\n' "${PTERO_VALHEIM_ADMINS[@]}" >> "$candidate"
+  fi
+  if sudo cmp -s "$candidate" "$list_path"; then
+    log "  Valheim admin list already holds ${#PTERO_VALHEIM_ADMINS[@]} ID(s)"
+  else
+    owner=$(sudo stat -c '%u:%g' "$list_path")
+    if sudo install -m 0644 -o "${owner%:*}" -g "${owner#*:}" "$candidate" "$list_path"; then
+      log "  Valheim admin list updated (${#PTERO_VALHEIM_ADMINS[@]} ID(s)); server reloads it within a minute"
+    else
+      warn "  failed to write $list_path"
+    fi
+  fi
+  rm -f "$candidate"
 }
 
 remove_legacy_valheim_schedule() {
@@ -688,6 +720,7 @@ PY
   done
 
   reconcile_valheim_variables
+  reconcile_valheim_adminlist
   remove_legacy_valheim_schedule
   ensure_pterodactyl_network
 
