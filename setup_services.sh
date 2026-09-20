@@ -934,6 +934,32 @@ ensure_jellyfin_library() {
     || warn "  failed to create the $name library"
 }
 
+ensure_jellyfin_trickplay() {
+  local token="$1" configuration desired
+  configuration=$(curl -fsS -m10 -H "X-Emby-Token: $token" http://localhost:8096/System/Configuration) || {
+    warn "  could not read the Jellyfin server configuration"
+    return
+  }
+  # Trickplay defaults to a software decode plus tone map, which burns a whole
+  # core on 4K HDR sources and starves the Valheim server that shares the host.
+  # QSV is already configured for playback, so reuse it and sample key frames.
+  # Both halves or neither: hardware encoding on its own uploads every
+  # software-decoded frame to the GPU just to write a 320px thumbnail.
+  desired=$(printf '%s' "$configuration" | jq '
+    .TrickplayOptions.EnableHwAcceleration = true
+    | .TrickplayOptions.EnableHwEncoding = true
+    | .TrickplayOptions.EnableKeyFrameOnlyExtraction = true
+    | .TrickplayOptions.ProcessThreads = 1')
+  if [ "$(printf '%s' "$configuration" | jq -cS .TrickplayOptions)" = "$(printf '%s' "$desired" | jq -cS .TrickplayOptions)" ]; then
+    log "  trickplay acceleration is configured"
+    return
+  fi
+  curl -fsS -m15 -X POST -H "X-Emby-Token: $token" -H 'Content-Type: application/json' \
+    -d "$desired" http://localhost:8096/System/Configuration >/dev/null \
+    && log "  trickplay acceleration enabled (restart Jellyfin to apply)" \
+    || warn "  failed to enable trickplay acceleration"
+}
+
 configure_jellyfin() {
   log "Jellyfin: administrator and libraries"
   local public_info username password token
@@ -963,6 +989,7 @@ configure_jellyfin() {
   [ -n "$token" ] || { warn "  stored credentials do not match the Jellyfin administrator — skipping libraries"; return; }
   ensure_jellyfin_library "$token" Movies movies /media/movies
   ensure_jellyfin_library "$token" TV tvshows /media/tv
+  ensure_jellyfin_trickplay "$token"
 }
 
 configure_qbit

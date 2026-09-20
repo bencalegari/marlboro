@@ -13,8 +13,9 @@ if [ -n "${MARLBORO_COMPOSE_SERVICES:-}" ]; then
 fi
 
 
-log() { echo -e "\033[1;32m==>\033[0m $1" >&2; }
-err() { echo -e "\033[1;31mERROR:\033[0m $1" >&2; exit 1; }
+log()  { echo -e "\033[1;32m==>\033[0m $1" >&2; }
+warn() { echo -e "\033[1;33mWARNING:\033[0m $1" >&2; }
+err()  { echo -e "\033[1;31mERROR:\033[0m $1" >&2; exit 1; }
 
 install_apt_packages() {
   local package missing=()
@@ -138,6 +139,21 @@ PY
   fi
 }
 
+configure_kernel_tuning() {
+  local destination candidate
+  destination=/etc/sysctl.d/60-marlboro.conf
+  candidate=$(mktemp)
+  # The game server and the media stack share 8 GB. A high swappiness lets the
+  # kernel page out idle Valheim heap, and faulting it back in during a tick
+  # shows up to players as a stutter, so keep reclaim biased towards cache.
+  printf 'vm.swappiness = 10\nvm.vfs_cache_pressure = 50\nvm.dirty_ratio = 10\nvm.dirty_background_ratio = 5\n' > "$candidate"
+  if ! sudo cmp -s "$candidate" "$destination"; then
+    sudo install -D -m 0644 "$candidate" "$destination"
+    sudo sysctl -q --load="$destination"
+  fi
+  rm -f "$candidate"
+}
+
 configure_system_dns() {
   local destination candidate resolver changed=0
   destination=/etc/systemd/resolved.conf.d/adguard.conf
@@ -238,6 +254,7 @@ prompt_plex_claim() {
 bootstrap_host_tools
 configure_docker_daemon
 configure_system_dns
+configure_kernel_tuning
 if ! op whoami &>/dev/null; then
   log "Sign in to 1Password to continue"
   eval "$(op signin)"
@@ -1054,6 +1071,11 @@ start_and_reconcile_stack() {
   (cd "$SCRIPT_DIR" && PLEX_CLAIM="$PLEX_CLAIM_VALUE" docker compose up -d "${COMPOSE_SERVICES[@]}")
   reconcile_sonarr_login_after_start
   "$SCRIPT_DIR/setup_services.sh"
+  # Keeps the Valheim world on NVMe instead of the shingled array. No-op once
+  # the bind mount is in place, and it declines to touch a server with players
+  # on it, so a reconcile during a session just leaves things alone.
+  sudo "$SCRIPT_DIR/migrate_valheim_world.sh" \
+    || warn "Valheim world storage was left on /mnt/tank — see migrate_valheim_world.sh"
   write_env_file
   if [ "${#COMPOSE_SERVICES[@]}" -eq 0 ]; then
     (cd "$SCRIPT_DIR" && docker compose up -d glance unpackerr)
