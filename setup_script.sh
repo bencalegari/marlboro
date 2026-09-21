@@ -154,6 +154,120 @@ configure_kernel_tuning() {
   rm -f "$candidate"
 }
 
+configure_valheim_world_storage() {
+  # Valheim's saves are small but write-heavy, and /mnt/tank is four SMR
+  # drives: chunk writes ran to nearly three seconds with nine players online
+  # and dropped to 18ms once the world sat on NVMe. Only worlds_local moves --
+  # the game binary and the SteamCMD tree stay on the array, where their bulk
+  # belongs and their read pattern costs nothing.
+  local uuid volume worlds root owner dropin reload=0
+  # Must match the default in backup_valheim_world.sh.
+  root=/var/lib/marlboro/valheim-worlds
+  dropin=/etc/systemd/system/docker.service.d/wait-for-valheim-world.conf
+
+  uuid=$(grep -oE 'VALHEIM_UUID=[0-9a-f-]+' "$SCRIPT_DIR/docker-compose.yml" | head -1 | cut -d= -f2)
+  [ -n "$uuid" ] || { warn "no VALHEIM_UUID in docker-compose.yml — skipping world storage"; return; }
+
+  volume=/mnt/tank/pterodactyl/volumes/$uuid
+  worlds=$volume/.config/unity3d/IronGate/Valheim/worlds_local
+  if [ ! -d "$volume" ]; then
+    log "Valheim volume not created yet — make the server in the panel, then rerun"
+    return
+  fi
+  owner=$(stat -c '%u:%g' "$volume")
+
+  sudo install -d -m 0755 "$(dirname "$root")"
+  sudo install -d -o "${owner%:*}" -g "${owner#*:}" -m 0755 "$root" "$worlds"
+
+  # Mounting an empty directory over a populated one hides the world rather
+  # than moving it, and Valheim answers an empty worlds_local by generating a
+  # brand new one. This is the restored-array case: seed the NVMe first.
+  if ! mountpoint -q "$worlds" \
+     && [ -n "$(sudo ls -A "$worlds" 2>/dev/null)" ] \
+     && [ -z "$(sudo ls -A "$root" 2>/dev/null)" ]; then
+    if [ -n "$(docker ps -q --filter "name=$uuid" 2>/dev/null)" ]; then
+      warn "a world exists at $worlds but $root is empty, and the server is running"
+      warn "  stop it in the panel and rerun — refusing to copy a live world"
+      return
+    fi
+    log "Seeding $root from the world already on the array"
+    sudo rsync -a "$worlds/" "$root/"
+    sudo diff -r -q "$worlds" "$root" >/dev/null \
+      || { warn "  copy did not verify — leaving the world on /mnt/tank"; return; }
+  fi
+
+  if ! grep -qF " $worlds none bind," /etc/fstab; then
+    sudo cp /etc/fstab "/etc/fstab.bak.$(date +%Y%m%d%H%M%S)"
+    printf '%s %s none bind,x-systemd.requires-mounts-for=/mnt/tank 0 0\n' "$root" "$worlds" \
+      | sudo tee -a /etc/fstab >/dev/null
+    reload=1
+  fi
+
+  # Docker already waits for /mnt/tank. The world is a second mount now, and a
+  # container built before it lands gets an empty directory and a fresh world,
+  # so docker has to wait for this one too.
+  if [ "$(sudo cat "$dropin" 2>/dev/null)" != "[Unit]
+RequiresMountsFor=$worlds" ]; then
+    sudo install -d -m 0755 "$(dirname "$dropin")"
+    printf '[Unit]\nRequiresMountsFor=%s\n' "$worlds" | sudo tee "$dropin" >/dev/null
+    sudo chmod 0644 "$dropin"
+    reload=1
+  fi
+
+  [ "$reload" -eq 1 ] && sudo systemctl daemon-reload
+  mountpoint -q "$worlds" || sudo mount "$worlds" \
+    || warn "could not bind mount $worlds — the world stays on /mnt/tank"
+}
+
+configure_valheim_backups() {
+  # The world's own auto-backups live beside it on the NVMe and reach about a
+  # day back. This puts dated copies on the array and keeps a month.
+  local service=/etc/systemd/system/valheim-world-backup.service
+  local timer=/etc/systemd/system/valheim-world-backup.timer
+  local candidate changed=0
+  candidate=$(mktemp)
+
+  cat > "$candidate" <<UNIT
+[Unit]
+Description=Archive the Valheim world to /mnt/tank
+RequiresMountsFor=/mnt/tank
+After=docker.service
+
+[Service]
+Type=oneshot
+User=$(id -un)
+ExecStart=$SCRIPT_DIR/backup_valheim_world.sh
+UNIT
+  if ! sudo cmp -s "$candidate" "$service"; then
+    sudo install -D -m 0644 "$candidate" "$service"
+    changed=1
+  fi
+
+  # Persistent so a run missed while the host was down happens on the next
+  # boot rather than silently leaving a hole in the history.
+  cat > "$candidate" <<'UNIT'
+[Unit]
+Description=Nightly Valheim world archive
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
+UNIT
+  if ! sudo cmp -s "$candidate" "$timer"; then
+    sudo install -D -m 0644 "$candidate" "$timer"
+    changed=1
+  fi
+  rm -f "$candidate"
+
+  [ "$changed" -eq 1 ] && sudo systemctl daemon-reload
+  sudo systemctl enable --now valheim-world-backup.timer >/dev/null 2>&1 \
+    || warn "could not enable valheim-world-backup.timer"
+}
+
 configure_system_dns() {
   local destination candidate resolver changed=0
   destination=/etc/systemd/resolved.conf.d/adguard.conf
@@ -255,6 +369,8 @@ bootstrap_host_tools
 configure_docker_daemon
 configure_system_dns
 configure_kernel_tuning
+configure_valheim_world_storage
+configure_valheim_backups
 if ! op whoami &>/dev/null; then
   log "Sign in to 1Password to continue"
   eval "$(op signin)"
@@ -1071,11 +1187,6 @@ start_and_reconcile_stack() {
   (cd "$SCRIPT_DIR" && PLEX_CLAIM="$PLEX_CLAIM_VALUE" docker compose up -d "${COMPOSE_SERVICES[@]}")
   reconcile_sonarr_login_after_start
   "$SCRIPT_DIR/setup_services.sh"
-  # Keeps the Valheim world on NVMe instead of the shingled array. No-op once
-  # the bind mount is in place, and it declines to touch a server with players
-  # on it, so a reconcile during a session just leaves things alone.
-  sudo "$SCRIPT_DIR/migrate_valheim_world.sh" \
-    || warn "Valheim world storage was left on /mnt/tank — see migrate_valheim_world.sh"
   write_env_file
   if [ "${#COMPOSE_SERVICES[@]}" -eq 0 ]; then
     (cd "$SCRIPT_DIR" && docker compose up -d glance unpackerr)
