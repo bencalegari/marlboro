@@ -29,6 +29,12 @@ services/ntfy/*
 services/ntfy/config/*
 !services/ntfy/config/server.yml
 
+!services/romm/
+services/romm/*
+!services/romm/config/
+services/romm/config/*
+!services/romm/config/config.yml
+
 !services/sms-bridge/
 services/sms-bridge/*
 !services/sms-bridge/bridge.py

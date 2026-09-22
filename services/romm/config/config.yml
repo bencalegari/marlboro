@@ -1,0 +1,8 @@
+# RomM configuration.
+# Required from RomM 5.3.0 onward: the filesystem layout is no longer
+# auto-detected, and RomM refuses to start unless it is declared here.
+# This declares "structure A", matching /mnt/tank/media/roms/roms/{platform}/.
+filesystem:
+  structure:
+    default: "roms/{platform}/{game}"
+    firmware: "bios/{platform}"
