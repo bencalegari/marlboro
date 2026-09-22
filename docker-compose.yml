@@ -592,15 +592,18 @@ services:
       - homelab
     depends_on:
       - wings
+      - ntfy
     environment:
       - TZ=America/Los_Angeles
       - VALHEIM_UUID=0fe911ae-87fb-40ea-a1f9-eec00498c5b8
+      - NTFY_TOPIC=valheim
       - RESTART_AT=03:00
       - WINDOW_MINUTES=180
       - POLL_SECONDS=300
     volumes:
       - ./services/valheim-autoupdate/guard.py:/guard.py:ro
       - ./services/pterodactyl/wings-etc:/etc/pterodactyl:ro
+      - /mnt/tank/pterodactyl/volumes/0fe911ae-87fb-40ea-a1f9-eec00498c5b8/BepInEx:/bepinex:ro
       - ./services/valheim-autoupdate/state:/srv
     command: ["python3", "-u", "/guard.py"]
     labels:

@@ -20,9 +20,24 @@ RETRY_WINDOW_MINUTES = int(os.environ.get("WINDOW_MINUTES", "180"))
 MAX_CONNECTION_LINE_AGE_SECONDS = int(os.environ.get("MAX_LINE_AGE_SECONDS", "1500"))
 DOCUMENT_ROOT = os.environ.get("DOC_ROOT", "/srv")
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8098"))
+NTFY_URL = os.environ.get("NTFY_URL", "http://ntfy:80")
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "valheim")
+STAMP_FILE = os.environ.get("STAMP_FILE", "/bepinex/.marlboro-mods")
+BEPINEX_LOG = os.environ.get("BEPINEX_LOG", "/bepinex/LogOutput.log")
+HEALTH_DELAY_SECONDS = int(os.environ.get("HEALTH_DELAY_SECONDS", "240"))
+HEALTH_RETRIES = int(os.environ.get("HEALTH_RETRIES", "3"))
 
 STATE_FILE = os.path.join(DOCUMENT_ROOT, "autoupdate.json")
 CONN_RE = re.compile(r"(\d\d/\d\d/\d{4} \d\d:\d\d:\d\d): +Connections (\d+)")
+BEPINEX_ERROR_RE = re.compile(r"^\[(?:Error|Fatal)\s*:\s*([^\]]+)\]")
+# The game logs its own headless-rendering failures through BepInEx.
+IGNORED_LOG_SOURCES = {"Unity Log"}
+THUNDERSTORE_API = "https://thunderstore.io/api/experimental/package/{0}/{1}/"
+THUNDERSTORE_PAGE = "https://thunderstore.io/c/valheim/p/{0}/{1}/"
+THUNDERSTORE_AGENT = "marlboro-valheim-autoupdate"
+
+
+NET_ERRORS = (urllib.error.URLError, OSError, ValueError)
 
 
 def log(msg):
@@ -71,6 +86,16 @@ def restart_server(token):
     wings_call(token, f"/api/servers/{SERVER_UUID}/power", {"action": "restart"})
 
 
+def publish_to_ntfy(title, body, tags, priority=None):
+    headers = {"Title": title, "Tags": tags}
+    if priority:
+        headers["Priority"] = priority
+    req = urllib.request.Request(
+        f"{NTFY_URL}/{NTFY_TOPIC}", data=body.encode(), headers=headers
+    )
+    urllib.request.urlopen(req, timeout=15).close()
+
+
 def load_state():
     try:
         with open(STATE_FILE) as fh:
@@ -79,16 +104,146 @@ def load_state():
         return {}
 
 
-def save_state(state, status, done_for=None):
-    if done_for:
-        state["done_for"] = done_for
-    state["status"] = status
-    state["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+def write_state(state):
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(state, fh)
     os.replace(tmp, STATE_FILE)
     return state
+
+
+def save_state(state, status, done_for=None):
+    if done_for:
+        state["done_for"] = done_for
+    state["status"] = status
+    state["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return write_state(state)
+
+
+def read_installed_mods():
+    mods = []
+    with open(STAMP_FILE) as fh:
+        for line in fh:
+            parts = line.strip().split()
+            if len(parts) == 2 and "/" in parts[0]:
+                mods.append((parts[0], parts[1]))
+    return mods
+
+
+def version_tuple(value):
+    return tuple(int(part) if part.isdigit() else 0 for part in value.split("."))
+
+
+def latest_version(package):
+    namespace, name = package.split("/", 1)
+    req = urllib.request.Request(
+        THUNDERSTORE_API.format(namespace, name),
+        headers={"Accept": "application/json", "User-Agent": THUNDERSTORE_AGENT},
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.load(resp)["latest"]["version_number"]
+
+
+def run_mod_version_check(state):
+    today = datetime.now().astimezone().date().isoformat()
+    if state.get("mods_checked_for") == today:
+        return
+
+    try:
+        mods = read_installed_mods()
+    except OSError as exc:
+        log(f"cannot read {STAMP_FILE}: {exc}")
+        return
+
+    announced = state.setdefault("mod_updates", {})
+    behind, stale, failed = [], 0, False
+    for package, installed in mods:
+        try:
+            latest = latest_version(package)
+        except NET_ERRORS as exc:
+            log(f"could not check {package}: {exc}")
+            failed = True
+            continue
+        if version_tuple(latest) <= version_tuple(installed):
+            announced.pop(package, None)
+            continue
+        stale += 1
+        if announced.get(package) != latest:
+            behind.append((package, installed, latest))
+        announced[package] = latest
+
+    if behind:
+        body = "\n".join(
+            f"{package} {installed} -> {latest}\n"
+            + THUNDERSTORE_PAGE.format(*package.split("/", 1))
+            for package, installed, latest in behind
+        )
+        try:
+            publish_to_ntfy("Valheim mod updates", body, "arrow_up")
+            log(f"{len(behind)} mod update(s) available - pushed to ntfy")
+        except NET_ERRORS as exc:
+            log(f"ntfy push failed for mod updates: {exc}")
+            for package, _, _ in behind:
+                announced.pop(package, None)
+            failed = True
+    elif stale:
+        log(f"{stale} mod update(s) available - already pushed")
+    elif not failed:
+        log("mods are at the newest published versions")
+
+    if not failed:
+        state["mods_checked_for"] = today
+    write_state(state)
+
+
+def run_health_check(state):
+    due = state.get("health_due")
+    if not due or time.time() < due:
+        return
+
+    # BepInEx truncates its log at startup, so the file is this boot alone --
+    # but only once the new process has written it.
+    restarted_at = due - HEALTH_DELAY_SECONDS
+    try:
+        written = os.path.getmtime(BEPINEX_LOG)
+        with open(BEPINEX_LOG, errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        written, lines = 0, []
+
+    if written < restarted_at:
+        tries = state.get("health_tries", 0) + 1
+        if tries <= HEALTH_RETRIES:
+            state["health_tries"] = tries
+            state["health_due"] = time.time() + HEALTH_DELAY_SECONDS
+            log(f"BepInEx has not written its log yet - retry {tries}/{HEALTH_RETRIES}")
+            write_state(state)
+            return
+        errors, headline = [], "BepInEx did not load on this boot"
+    else:
+        errors = [line for line in lines
+                  if (match := BEPINEX_ERROR_RE.match(line))
+                  and match.group(1).strip() not in IGNORED_LOG_SOURCES]
+        started = any("Chainloader started" in line for line in lines)
+        complete = any("Chainloader startup complete" in line for line in lines)
+        if not errors and (complete or not started):
+            state.pop("health_due", None)
+            state.pop("health_tries", None)
+            log("BepInEx loaded cleanly after the restart")
+            write_state(state)
+            return
+        headline = ("Chainloader did not finish" if started and not complete
+                    else "BepInEx reported errors")
+
+    state.pop("health_due", None)
+    state.pop("health_tries", None)
+    body = "\n".join([headline] + [line.strip()[:200] for line in errors[:3]])
+    try:
+        publish_to_ntfy("Valheim mods failed to load", body, "warning", priority="high")
+        log(f"mod health check failed: {headline}")
+    except NET_ERRORS as exc:
+        log(f"ntfy push failed for the mod health check: {exc}")
+    write_state(state)
 
 
 def run_scheduled_check(token, state):
@@ -129,6 +284,7 @@ def run_scheduled_check(token, state):
 
     restart_server(token)
     log("server empty - restart sent (SteamCMD runs on the way back up)")
+    state["health_due"] = time.time() + HEALTH_DELAY_SECONDS
     save_state(state, "restarted while empty", done_for=today)
 
 
@@ -154,7 +310,9 @@ def main():
     while True:
         try:
             run_scheduled_check(token, state)
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+            run_health_check(state)
+            run_mod_version_check(state)
+        except NET_ERRORS as exc:
             log(f"check failed: {exc}")
         time.sleep(POLL_SECONDS)
 

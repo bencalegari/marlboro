@@ -93,7 +93,7 @@ ensure_docker_access() {
 bootstrap_host_tools() {
   command -v apt-get >/dev/null || err "This setup requires an apt-based Ubuntu host."
   sudo -v
-  install_apt_packages ca-certificates curl gnupg jq openssl python3 python3-yaml
+  install_apt_packages ca-certificates curl gnupg jq openssl unzip python3 python3-yaml
   install_docker
   install_onepassword_cli
   ensure_docker_access
@@ -217,6 +217,91 @@ RequiresMountsFor=$worlds" ]; then
   [ "$reload" -eq 1 ] && sudo systemctl daemon-reload
   mountpoint -q "$worlds" || sudo mount "$worlds" \
     || warn "could not bind mount $worlds — the world stays on /mnt/tank"
+}
+
+VALHEIM_BEPINEX=denikson/BepInExPack_Valheim/5.4.2350
+VALHEIM_MODS=(
+  Advize/PlantEverything/1.21.2
+  # Broken on Valheim 1.0: https://github.com/nbusseneau/BetterCartographyTable/issues/21
+  # ValheimModding/Jotunn/2.30.2
+  # nbusseneau/Better_Cartography_Table/0.8.1
+)
+
+configure_valheim_mods() {
+  local uuid volume stamp desired staging package full name version url owner
+  uuid=$(grep -oE 'VALHEIM_UUID=[0-9a-f-]+' "$SCRIPT_DIR/docker-compose.yml" | head -1 | cut -d= -f2)
+  [ -n "$uuid" ] || { warn "no VALHEIM_UUID in docker-compose.yml — skipping mods"; return; }
+
+  volume=/mnt/tank/pterodactyl/volumes/$uuid
+  stamp=$volume/BepInEx/.marlboro-mods
+  if [ ! -d "$volume" ]; then
+    log "Valheim volume not created yet — make the server in the panel, then rerun"
+    return
+  fi
+
+  desired="# Managed by setup_script.sh configure_valheim_mods -- do not edit.
+layout 2"
+  for package in "$VALHEIM_BEPINEX" "${VALHEIM_MODS[@]}"; do
+    desired="$desired
+${package%/*} ${package##*/}"
+  done
+
+  if [ "$(sudo cat "$stamp" 2>/dev/null)" = "$desired" ]; then
+    log "Valheim mods already at the pinned versions"
+    return
+  fi
+
+  staging=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$staging'" RETURN
+
+  url="https://thunderstore.io/package/download/$VALHEIM_BEPINEX/"
+  if ! curl -fsSL -o "$staging/bepinex.zip" "$url"; then
+    warn "could not download $VALHEIM_BEPINEX — leaving the mods alone"
+    return
+  fi
+  unzip -q -o "$staging/bepinex.zip" -d "$staging/bepinex"
+  mkdir -p "$staging/tree/BepInEx/plugins" "$staging/tree/doorstop_libs"
+  cp -a "$staging/bepinex/BepInExPack_Valheim/BepInEx/core" "$staging/tree/BepInEx/core"
+  cp -a "$staging/bepinex/BepInExPack_Valheim/BepInEx/config/BepInEx.cfg" "$staging/BepInEx.cfg"
+  cp -a "$staging/bepinex/BepInExPack_Valheim/doorstop_libs/libdoorstop_x64.so" \
+        "$staging/tree/doorstop_libs/"
+  cp -a "$staging/bepinex/BepInExPack_Valheim/.doorstop_version" "$staging/tree/"
+
+  for package in "${VALHEIM_MODS[@]}"; do
+    full=${package%/*}; full=${full/\//-}
+    name=${package#*/}; name=${name%/*}
+    version=${package##*/}
+    url="https://thunderstore.io/package/download/$package/"
+    if ! curl -fsSL -o "$staging/mod.zip" "$url"; then
+      warn "could not download $name $version — leaving the mods alone"
+      return
+    fi
+    rm -rf "$staging/pkg"
+    if ! unzip -q -o "$staging/mod.zip" -d "$staging/pkg"; then
+      warn "could not unpack $name $version — leaving the mods alone"
+      return
+    fi
+    if [ -d "$staging/pkg/BepInEx" ]; then
+      cp -a "$staging/pkg/." "$staging/tree/"
+    else
+      mkdir -p "$staging/tree/BepInEx/plugins/$full"
+      cp -a "$staging/pkg/." "$staging/tree/BepInEx/plugins/$full/"
+    fi
+    rm -f "$staging/mod.zip"
+  done
+  printf '%s\n' "$desired" > "$staging/tree/BepInEx/.marlboro-mods"
+
+  owner=$(stat -c '%u:%g' "$volume")
+  sudo rm -rf "$volume/BepInEx/core" "$volume/BepInEx/plugins" "$volume/doorstop_libs"
+  sudo cp -a "$staging/tree/." "$volume/"
+  sudo install -d "$volume/BepInEx/config"
+  sudo test -f "$volume/BepInEx/config/BepInEx.cfg" \
+    || sudo cp -a "$staging/BepInEx.cfg" "$volume/BepInEx/config/BepInEx.cfg"
+  sudo chown -R "$owner" "$volume/BepInEx" "$volume/doorstop_libs" "$volume/.doorstop_version"
+
+  log "Valheim mods installed: ${VALHEIM_BEPINEX##*/} BepInEx + ${#VALHEIM_MODS[@]} plugin(s)"
+  warn "  restart the Valheim server to load them"
 }
 
 configure_valheim_backups() {
@@ -371,6 +456,7 @@ configure_system_dns
 configure_kernel_tuning
 configure_valheim_world_storage
 configure_valheim_backups
+configure_valheim_mods
 if ! op whoami &>/dev/null; then
   log "Sign in to 1Password to continue"
   eval "$(op signin)"

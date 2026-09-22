@@ -436,6 +436,7 @@ PTERO_GATEWAY=172.22.0.1
 PTERO_ALLOC_IP=0.0.0.0
 PTERO_ALLOC_PORTS=(2456 2457)
 PTERO_VALHEIM_SERVER=Valheim
+PTERO_VALHEIM_EGG=Valheim
 PTERO_VALHEIM_CROSSPLAY=1
 PTERO_VALHEIM_AUTO_UPDATE=1
 # SteamID64 per entry (crossplay players use their PlayFab ID instead)
@@ -550,6 +551,43 @@ reconcile_valheim_variables() {
       warn "  $variable_name $current_value → $desired_value; restart Valheim to apply it"
     fi
   done
+}
+
+reconcile_valheim_startup() {
+  local desired current egg_id
+  desired=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['startup'],end='')" \
+              "$SCRIPT_DIR/services/pterodactyl/egg-valheim.json" 2>/dev/null || true)
+  if [ -z "$desired" ]; then
+    warn "  could not read the startup line from egg-valheim.json"
+    return
+  fi
+  case $desired in
+    *\'*|*\\*) warn "  startup line has a quote or backslash — not reconciling"; return ;;
+  esac
+
+  egg_id=$(ptero_sql "SELECT id FROM eggs WHERE name='$PTERO_VALHEIM_EGG' LIMIT 1;")
+  if [ -n "$egg_id" ]; then
+    current=$(ptero_sql "SELECT startup FROM eggs WHERE id=$egg_id;")
+    if [ "$current" = "$desired" ]; then
+      log "  Valheim egg startup already matches"
+    else
+      ptero_sql "UPDATE eggs SET startup='$desired', updated_at=NOW() WHERE id=$egg_id;" >/dev/null
+      log "  Valheim egg startup updated"
+    fi
+  fi
+
+  if [ -z "$(ptero_sql "SELECT id FROM servers WHERE name='$PTERO_VALHEIM_SERVER' LIMIT 1;")" ]; then
+    log "  no $PTERO_VALHEIM_SERVER server yet — skipping startup line"
+    return
+  fi
+  current=$(ptero_sql "SELECT startup FROM servers WHERE name='$PTERO_VALHEIM_SERVER' LIMIT 1;")
+  if [ "$current" = "$desired" ]; then
+    log "  Valheim startup line already loads BepInEx"
+  else
+    ptero_sql "UPDATE servers SET startup='$desired', updated_at=NOW()
+               WHERE name='$PTERO_VALHEIM_SERVER';" >/dev/null
+    warn "  Valheim startup line updated; restart the server to load BepInEx"
+  fi
 }
 
 reconcile_valheim_adminlist() {
@@ -720,6 +758,7 @@ PY
   done
 
   reconcile_valheim_variables
+  reconcile_valheim_startup
   reconcile_valheim_adminlist
   remove_legacy_valheim_schedule
   ensure_pterodactyl_network
