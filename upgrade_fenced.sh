@@ -300,8 +300,11 @@ GROUP="wrap-up"
 # Gated on FENCED_ONESHOT=1, which only the cron line sets. Without this gate a
 # manual run would quietly cancel a scheduled one, which is the opposite of
 # what anyone running this by hand intends.
-if [ "${FENCED_ONESHOT:-0}" = 1 ] && [ "$(crontab -l 2>/dev/null | grep -c 'upgrade_fenced.sh' || true)" -gt 0 ]; then
-  if crontab -l 2>/dev/null | grep -v 'upgrade_fenced.sh' | crontab -; then
+# Matches on 'upgrade_fenced' rather than the full script path so the block's
+# own comment lines go with it -- write those comments to mention
+# upgrade_fenced.sh, or they survive as orphans after the schedule line is cut.
+if [ "${FENCED_ONESHOT:-0}" = 1 ] && [ "$(crontab -l 2>/dev/null | grep -c 'upgrade_fenced' || true)" -gt 0 ]; then
+  if crontab -l 2>/dev/null | grep -v 'upgrade_fenced' | crontab -; then
     echo "removed the one-shot crontab entry"
   else
     echo "WARN: could not remove the one-shot crontab entry -- remove it by hand"
