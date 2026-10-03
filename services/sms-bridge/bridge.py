@@ -426,7 +426,7 @@ def handle_text(phone, name, text):
     if not choices:
         return f'Nothing found for "{text[:60]}". Try the exact title.'
 
-    if len(choices) == 1 and choices[0]["status"] == ST_AVAILABLE:
+    if len(choices) == 1 and (choices[0]["mediaType"] == "tv" or choices[0]["status"] == ST_AVAILABLE):
         return do_request(phone, name, choices[0])
 
     put_session(phone, {"kind": "titles", "choices": choices})
@@ -441,28 +441,36 @@ def nothing_left_msg(choice):
 
 
 def do_request(phone, name, choice):
-    in_seerr = choice["status"] in (ST_PENDING, ST_PROCESSING, ST_PARTIAL, ST_AVAILABLE)
-    if choice["mediaType"] == "tv" and in_seerr:
-        return offer_seasons(phone, choice)
-    if in_seerr:
+    if choice["mediaType"] == "tv":
+        return offer_seasons(phone, name, choice)
+    if choice["status"] in (ST_PENDING, ST_PROCESSING, ST_PARTIAL, ST_AVAILABLE):
         return nothing_left_msg(choice)
     return submit_request(phone, name, choice, None)
 
 
-def offer_seasons(phone, choice):
-    """A series Seerr already knows may still have seasons nobody asked for."""
+def offer_seasons(phone, name, choice):
+    in_seerr = choice["status"] in (ST_PENDING, ST_PROCESSING, ST_PARTIAL, ST_AVAILABLE)
     try:
         open_seasons = tv_open_seasons(choice["tmdbId"])
     except Exception as e:
         log(f"ERROR: season lookup for {choice['title']!r} failed: {e}")
-        return nothing_left_msg(choice)
+        if in_seerr:
+            return nothing_left_msg(choice)
+        return f"Couldn't load seasons for {choice['title'][:40]}. Try again in a bit."
     if not open_seasons:
-        return nothing_left_msg(choice)
+        if in_seerr:
+            return nothing_left_msg(choice)
+        return submit_request(phone, name, choice, None)
 
     put_session(phone, {"kind": "seasons", "choice": choice, "seasons": open_seasons})
+    if in_seerr:
+        return (
+            f"{choice['title'][:40]}: seasons {fmt_seasons(open_seasons)} aren't requested yet.\n"
+            "Reply which to add (e.g. 2, 2-4, 2,4) or ALL."
+        )
     return (
-        f"{choice['title'][:40]}: seasons {fmt_seasons(open_seasons)} aren't requested yet.\n"
-        "Reply which to add (e.g. 2, 2-4, 2,4) or ALL."
+        f"{choice['title'][:40]}: seasons {fmt_seasons(open_seasons)}.\n"
+        "Reply which to request (e.g. 2, 2-4, 2,4) or ALL."
     )
 
 

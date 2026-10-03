@@ -279,8 +279,7 @@ class SeriesSeasonTests(BridgeTestCase):
 
     def offer(self):
         self.seerr.requests.clear()
-        self.text(self.TITLE)
-        return self.text("1")
+        return self.text(self.TITLE)
 
     def test_offer_lists_only_open_seasons(self):
         self.assertEqual(
@@ -355,10 +354,16 @@ class SeriesSeasonTests(BridgeTestCase):
 
     def test_a_new_title_during_a_season_session_searches_again(self):
         self.offer()
-        self.assertEqual(
-            self.text(self.TITLE).splitlines()[-1], "Reply 1 to request."
-        )
+        self.seerr.set_search(MOVIE, series(999, "Heat: The Series", None))
+        self.assertEqual(self.text("Heat").splitlines()[-1], "Reply 1-2 to request.")
         self.assertEqual(self.seerr.requests, [])
+
+    def test_series_picked_from_a_list_offers_seasons(self):
+        self.seerr.set_search(
+            series(235970, self.TITLE, bridge.ST_PARTIAL), series(999, "Other Show", None)
+        )
+        self.text(self.TITLE)
+        self.assertIn("seasons 3-4 aren't requested yet", self.text("1"))
 
     def test_fully_requested_series_says_so(self):
         self.seerr.set_seasons(aired={1: 8}, taken={1: bridge.ST_PROCESSING})
@@ -384,14 +389,53 @@ class SeriesSeasonTests(BridgeTestCase):
             f"{self.TITLE} is already requested — you'll get a text when it lands.",
         )
 
-    def test_unrequested_series_asks_for_every_season(self):
-        self.seerr.set_search(series(999, "Brand New Show", None))
-        self.text("Brand New Show")
+
+
+class NewSeriesTests(BridgeTestCase):
+    """A series Seerr has never seen still gets a season list, not an all-seasons request."""
+
+    TITLE = "The Real Housewives of New York City"
+
+    def setUp(self):
+        super().setUp()
+        self.seerr.set_search(series(4489, self.TITLE, None, year="2008"))
+        self.seerr.set_seasons(aired={0: 12, **{n: 20 for n in range(1, 16)}, 16: 0}, taken={})
+
+    def test_single_hit_goes_straight_to_the_season_list(self):
         self.assertEqual(
-            self.text("1"),
-            "Requested Brand New Show. You'll get a text when it's on Jellyfin.",
+            self.text("Real Housewives of New York"),
+            f"{self.TITLE}: seasons 1-15.\nReply which to request (e.g. 2, 2-4, 2,4) or ALL.",
+        )
+        self.assertEqual(self.seerr.requests, [])
+
+    def test_picked_seasons_are_requested(self):
+        self.text(self.TITLE)
+        self.assertEqual(
+            self.text("1-2"),
+            f"Requested {self.TITLE} S1-2. You'll get a text when it's on Jellyfin.",
+        )
+        self.assertEqual(self.last_request()["seasons"], [1, 2])
+
+    def test_all_requests_every_aired_season(self):
+        self.text(self.TITLE)
+        self.text("all")
+        self.assertEqual(self.last_request()["seasons"], list(range(1, 16)))
+
+    def test_unaired_series_is_requested_outright(self):
+        self.seerr.set_seasons(aired={1: 0}, taken={})
+        self.assertEqual(
+            self.text(self.TITLE),
+            f"Requested {self.TITLE}. You'll get a text when it's on Jellyfin.",
         )
         self.assertEqual(self.last_request()["seasons"], "all")
+
+    def test_season_lookup_failure_requests_nothing(self):
+        self.seerr.tv_error = RuntimeError("seerr down")
+        self.assertEqual(
+            self.text(self.TITLE),
+            f"Couldn't load seasons for {self.TITLE}. Try again in a bit.",
+        )
+        self.assertEqual(self.seerr.requests, [])
 
 
 class SessionTests(BridgeTestCase):
