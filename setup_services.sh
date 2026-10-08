@@ -1006,8 +1006,8 @@ configure_jellyfin() {
     || { warn "  Jellyfin unreachable — skipping"; return; }
   command -v op >/dev/null && op whoami >/dev/null 2>&1 \
     || { warn "  sign in to 1Password to configure Jellyfin"; return; }
-  username=$(op item get "Marlboro NAS - Jellyfin" --vault Private --fields username --reveal 2>/dev/null || true)
-  password=$(op item get "Marlboro NAS - Jellyfin" --vault Private --fields password --reveal 2>/dev/null || true)
+  username=$(op item get "Marlboro NAS - Jellyfin / Seerr" --vault Private --fields username --reveal 2>/dev/null || true)
+  password=$(op item get "Marlboro NAS - Jellyfin / Seerr" --vault Private --fields password --reveal 2>/dev/null || true)
   [ -n "$username" ] && [ -n "$password" ] || { warn "  Jellyfin credentials are unavailable"; return; }
   if [ "$(printf '%s' "$public_info" | jq -r '.StartupWizardCompleted')" != "true" ]; then
     curl -fsS -m10 -X POST http://localhost:8096/Startup/Configuration \
